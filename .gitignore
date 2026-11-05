@@ -1,0 +1,21 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Output 3D models and test artifacts
+output/*.stl
+*.stl
+*.mp4
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environments
+venv/
+.env/
+env/
+
+# IDE
+.vscode/
+.idea/
