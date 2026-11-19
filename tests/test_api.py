@@ -73,6 +73,24 @@ class TestAPI(unittest.TestCase):
         self.assertEqual(dl_res.status_code, 200)
         self.assertGreater(len(dl_res.content), 0)
 
+    def test_export_with_constant_boundary(self):
+        # Trigger export with rounded_rect framing
+        res = self.client.post("/api/export", json={
+            "format": "stl",
+            "level": 0.5,
+            "constant_boundary": "rounded_rect",
+            "boundary_mode": "framed",
+            "boundary_bezel": 3.0,
+            "base_plate_slices": 2,
+            "step_size": 1,
+            "smooth_iterations": 0,
+        })
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["status"], "success")
+        self.assertTrue(data["stats"]["is_watertight"])
+        self.assertGreater(data["stats"]["volume_mm3"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

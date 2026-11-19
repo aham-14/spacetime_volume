@@ -176,6 +176,40 @@ class SpaceTimeViewer:
             layout=w.Layout(width="220px"),
         )
 
+        # --- Constant Boundary / Framing Controls ---
+        self.boundary_dropdown = w.Dropdown(
+            options=[("No Enclosure (Raw Motion)", "None"),
+                     ("Rounded Rectangle", "rounded_rect"),
+                     ("Cylinder / Circle", "circle"),
+                     ("Sharp Box", "box")],
+            value="None",
+            description="Frame:",
+            tooltip="Constant shape footprint for SLA manufacturing consistency",
+            layout=w.Layout(width="260px"),
+        )
+        self.boundary_mode_dropdown = w.Dropdown(
+            options=[("Framed Bezel", "framed"),
+                     ("Monolithic Trim", "monolith"),
+                     ("Solid Relief", "solid_relief")],
+            value="framed",
+            description="Style:",
+            tooltip="Enclosure styling: framed structural bezel, monolithic boundary trim, or solid relief",
+            layout=w.Layout(width="200px"),
+        )
+        self.boundary_bezel_slider = w.FloatSlider(
+            value=4.0, min=1.0, max=16.0, step=0.5,
+            description="Bezel (vox):",
+            tooltip="Width of continuous outer framing bezel in voxels",
+            readout_format=".1f",
+            layout=w.Layout(width="220px"),
+        )
+        self.base_plate_slider = w.IntSlider(
+            value=0, min=0, max=10, step=1,
+            description="Base raft:",
+            tooltip="Number of bottom slices filled solid for 3D print bed adhesion",
+            layout=w.Layout(width="200px"),
+        )
+
         self.stl_path_text = w.Text(
             value=str(Path(self._stl_output_dir) / "spacetime_model.stl"),
             description="Mesh path:",
@@ -305,6 +339,10 @@ class SpaceTimeViewer:
             [self.hollow_toggle, self.hollow_wall_slider],
             layout=w.Layout(align_items="center", gap="12px", margin="2px 0"),
         )
+        r_boundary_cfg = w.HBox(
+            [self.boundary_dropdown, self.boundary_mode_dropdown, self.boundary_bezel_slider, self.base_plate_slider],
+            layout=w.Layout(align_items="center", gap="12px", margin="2px 0", flex_wrap="wrap"),
+        )
         r_stl_params = w.HBox(
             [self.stl_path_text, self.format_dropdown, self.level_slider,
              self.step_size_slider, self.smooth_iters_slider,
@@ -316,7 +354,7 @@ class SpaceTimeViewer:
             layout=w.Layout(align_items="center", gap="12px"),
         )
         stl_panel = w.VBox(
-            [r_mold_cfg, r_hollow_cfg, r_stl_params, r_stl_btn],
+            [r_mold_cfg, r_hollow_cfg, r_boundary_cfg, r_stl_params, r_stl_btn],
             layout=w.Layout(
                 border="1px solid #3a75c4", border_radius="6px",
                 padding="10px 14px", margin="8px 0", background_color="#181e29"
@@ -500,6 +538,10 @@ class SpaceTimeViewer:
             "smooth_iterations": int(self.smooth_iters_slider.value),
             "voxel_size": float(self.voxel_size_slider.value),
             "chunk_size": int(self.chunk_size_slider.value),
+            "constant_boundary": self.boundary_dropdown.value if self.boundary_dropdown.value != "None" else None,
+            "boundary_mode": self.boundary_mode_dropdown.value,
+            "boundary_bezel": float(self.boundary_bezel_slider.value),
+            "base_plate_slices": int(self.base_plate_slider.value),
         }
 
         self.stl_btn.disabled = True

@@ -29,4 +29,10 @@ This plan outlines the next phase of professional SLA resin manufacturing, casti
 - [x] **9.2**: Update `requirements.txt` with `fastapi`, `uvicorn`, `python-multipart`
 - [x] **9.3**: Integration tests for FastAPI endpoints in `tests/test_api.py` (passed)
 
+### Task 10: Constant Geometric Enclosure & Monolithic Framing
+- [x] **10.1**: Implement `apply_constant_boundary()` in `engine/volume.py` supporting `shape="rounded_rect" | "circle" | "box"` and `mode="framed" | "solid_relief" | "monolith"`
+- [x] **10.2**: Wire boundary options into `MeshExporter` (`engine/mesh_export.py`)
+- [x] **10.3**: Expose geometric enclosure controls in `viewer.py` and `api.py` web studio
+- [x] **10.4**: Unit tests in `tests/test_constant_boundary.py` ensuring dimensional consistency, manifold mesh creation, and boundary containment
+
 ---

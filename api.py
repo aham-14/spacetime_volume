@@ -103,6 +103,11 @@ class ExportRequest(BaseModel):
     step_size: int = Field(1, ge=1, le=4)
     voxel_size_mm: float = Field(0.5, ge=0.05, le=5.0)
     smooth_iterations: int = Field(4, ge=0, le=20)
+    constant_boundary: Optional[str] = Field(None, description="Constant frame shape: None, rounded_rect, circle, box")
+    boundary_mode: str = Field("framed", description="framed, monolith, or solid_relief")
+    boundary_bezel: float = Field(4.0, ge=1.0, le=20.0)
+    boundary_corner_radius: float = Field(8.0, ge=0.0, le=50.0)
+    base_plate_slices: int = Field(0, ge=0, le=20)
 
 
 # ---------------------------------------------------------------------------
@@ -261,6 +266,11 @@ def export_mesh(req: ExportRequest):
             mold_open_top=req.mold_open_top,
             as_hollow=req.as_hollow,
             hollow_wall_thickness=req.hollow_wall_thickness,
+            constant_boundary=req.constant_boundary,
+            boundary_mode=req.boundary_mode,
+            boundary_bezel=req.boundary_bezel,
+            boundary_corner_radius=req.boundary_corner_radius,
+            base_plate_slices=req.base_plate_slices,
         )
         stats = exporter.export(vol, out_path, level=req.level)
 
@@ -482,6 +492,31 @@ def index_page():
           <label>Isosurface Level:</label>
           <input type="range" id="level" min="0.1" max="0.9" step="0.05" value="0.5">
           <span id="level_val" style="font-size:0.75rem; color:#94a3b8;">0.50</span>
+        </div>
+        <div class="field">
+          <label>Constant Footprint Frame:</label>
+          <select id="constant_boundary">
+            <option value="None" selected>None (Raw Subject Motion)</option>
+            <option value="rounded_rect">Rounded Rectangle (Smooth Bezel)</option>
+            <option value="circle">Circular / Cylinder</option>
+            <option value="box">Sharp Box</option>
+          </select>
+        </div>
+        <div class="field" id="field_boundary_mode">
+          <label>Enclosure Style:</label>
+          <select id="boundary_mode">
+            <option value="framed" selected>Framed Bezel (Outer Wall + Cavity)</option>
+            <option value="monolith">Monolithic Trim (Prism Boundary)</option>
+            <option value="solid_relief">Solid Relief Column</option>
+          </select>
+        </div>
+        <div class="field" id="field_boundary_bezel">
+          <label>Bezel Wall Width (vox):</label>
+          <input type="number" id="boundary_bezel" value="4.0" step="0.5" min="1.0" max="16.0">
+        </div>
+        <div class="field" id="field_base_plate">
+          <label>Base Raft Slices (Floor):</label>
+          <input type="number" id="base_plate_slices" value="0" min="0" max="10">
         </div>
         <div class="checkbox-field">
           <input type="checkbox" id="as_hollow">
@@ -715,6 +750,7 @@ def index_page():
     document.getElementById('btn_export').onclick = async () => {{
       statusMsg.innerText = "Extracting & smoothing 3D mesh...";
       const fmt = document.getElementById('format').value;
+      const boundaryVal = document.getElementById('constant_boundary').value;
       const res = await fetch('/api/export', {{
         method: 'POST',
         headers: {{ 'Content-Type': 'application/json' }},
@@ -722,7 +758,11 @@ def index_page():
           format: fmt,
           level: parseFloat(levelSlider.value),
           as_hollow: document.getElementById('as_hollow').checked,
-          as_negative_mold: document.getElementById('as_mold').checked
+          as_negative_mold: document.getElementById('as_mold').checked,
+          constant_boundary: boundaryVal !== 'None' ? boundaryVal : null,
+          boundary_mode: document.getElementById('boundary_mode').value,
+          boundary_bezel: parseFloat(document.getElementById('boundary_bezel').value),
+          base_plate_slices: parseInt(document.getElementById('base_plate_slices').value)
         }})
       }});
       const data = await res.json();

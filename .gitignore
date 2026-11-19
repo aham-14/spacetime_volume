@@ -5,8 +5,12 @@ __pycache__/
 
 # Output 3D models and test artifacts
 output/*.stl
+output/*.glb
+output/*.obj
+output/*.ply
 *.stl
 *.mp4
+*.mmap
 
 # Jupyter
 .ipynb_checkpoints/

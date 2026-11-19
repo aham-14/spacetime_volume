@@ -507,6 +507,12 @@ class MeshExporter:
         as_hollow: bool = False,
         hollow_wall_thickness: float = 3.0,
         auto_drain_holes: bool = True,
+        constant_boundary: Optional[str] = None,
+        boundary_mode: str = "framed",
+        boundary_bezel: float = 4.0,
+        boundary_corner_radius: float = 8.0,
+        boundary_padding: float = 2.0,
+        base_plate_slices: int = 0,
     ) -> None:
         self.level = level
         self.step_size = step_size
@@ -522,6 +528,12 @@ class MeshExporter:
         self.as_hollow = as_hollow
         self.hollow_wall_thickness = hollow_wall_thickness
         self.auto_drain_holes = auto_drain_holes
+        self.constant_boundary = constant_boundary
+        self.boundary_mode = boundary_mode
+        self.boundary_bezel = boundary_bezel
+        self.boundary_corner_radius = boundary_corner_radius
+        self.boundary_padding = boundary_padding
+        self.base_plate_slices = base_plate_slices
 
     def export(
         self,
@@ -535,6 +547,12 @@ class MeshExporter:
         as_hollow: Optional[bool] = None,
         hollow_wall_thickness: Optional[float] = None,
         auto_drain_holes: Optional[bool] = None,
+        constant_boundary: Optional[str] = None,
+        boundary_mode: Optional[str] = None,
+        boundary_bezel: Optional[float] = None,
+        boundary_corner_radius: Optional[float] = None,
+        boundary_padding: Optional[float] = None,
+        base_plate_slices: Optional[int] = None,
         repair_mesh: bool = True,
         progress_callback: Optional[Callable[[float], None]] = None,
     ) -> MeshStats:
@@ -577,13 +595,31 @@ class MeshExporter:
         hollow_th = self.hollow_wall_thickness if hollow_wall_thickness is None else hollow_wall_thickness
         drain = self.auto_drain_holes if auto_drain_holes is None else auto_drain_holes
 
+        eff_boundary = self.constant_boundary if constant_boundary is None else constant_boundary
+        eff_b_mode = self.boundary_mode if boundary_mode is None else boundary_mode
+        eff_bezel = self.boundary_bezel if boundary_bezel is None else boundary_bezel
+        eff_cr = self.boundary_corner_radius if boundary_corner_radius is None else boundary_corner_radius
+        eff_pad = self.boundary_padding if boundary_padding is None else boundary_padding
+        eff_base = self.base_plate_slices if base_plate_slices is None else base_plate_slices
+
         # --------------------------------------------------------------
-        # 1. Prepare target volume (Positive, Hollow Shell, or Mold)
+        # 1. Prepare target volume (Enclosure Framing, Mold, or Hollow)
         # --------------------------------------------------------------
+        work_vol = vol
+        if eff_boundary is not None and str(eff_boundary).strip().lower() not in ("none", "", "false"):
+            work_vol = work_vol.apply_constant_boundary(
+                shape=str(eff_boundary),
+                mode=eff_b_mode,
+                bezel_voxels=float(eff_bezel),
+                corner_radius=float(eff_cr),
+                padding_voxels=float(eff_pad),
+                base_plate_slices=int(eff_base),
+            )
+
         if is_mold:
             # Generate negative mold (streamed / chunked friendly)
             target_vol = generate_negative_mold(
-                vol,
+                work_vol,
                 wall_thickness=wall_th,
                 open_top=open_tp,
             )
@@ -591,7 +627,7 @@ class MeshExporter:
             effective_pad = 0  # Mold generator already includes sealing boundary padding
         elif is_hollow:
             # Hollow the volume for SLA resin savings
-            target_vol = vol.hollow(wall_thickness_vox=hollow_th, auto_drain=drain)
+            target_vol = work_vol.hollow(wall_thickness_vox=hollow_th, auto_drain=drain)
             data = target_vol.data
             effective_pad = pad
             if effective_pad > 0:
@@ -599,7 +635,7 @@ class MeshExporter:
             else:
                 data_to_mesh = data
         else:
-            data = vol.data
+            data = work_vol.data
             effective_pad = pad
             if effective_pad > 0:
                 data_to_mesh = np.pad(data, pad_width=effective_pad, mode="constant", constant_values=0.0)

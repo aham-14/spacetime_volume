@@ -295,6 +295,119 @@ class SpaceTimeVolume:
         }
         return SpaceTimeVolume(hollow_arr, new_meta)
 
+    def apply_constant_boundary(
+        self,
+        shape: str = "rounded_rect",
+        mode: str = "framed",
+        bezel_voxels: float = 4.0,
+        corner_radius: float = 8.0,
+        padding_voxels: float = 2.0,
+        fill_density: float = 1.0,
+        base_plate_slices: int = 0,
+    ) -> SpaceTimeVolume:
+        """Apply a constant geometric footprint/enclosure (rounded_rect, circle, box)
+        across all time frames of the space-time volume.
+
+        Parameters
+        ----------
+        shape : str
+            "rounded_rect", "circle", or "box"
+        mode : str
+            "framed", "monolith", or "solid_relief"
+        bezel_voxels : float
+            Width of the outer framing bezel in voxels.
+        corner_radius : float
+            Corner radius in voxels for "rounded_rect".
+        padding_voxels : float
+            Offset margin from the frame grid edges.
+        fill_density : float
+            Material density in [0, 1] for bezel walls or relief background.
+        base_plate_slices : int
+            If > 0, fills the first N bottom slices solid inside the boundary shape.
+
+        Returns
+        -------
+        SpaceTimeVolume
+        """
+        from .sdf_shapes import sdf_disc, sdf_rect, sdf_rounded_rect, sdf_to_intensity
+
+        T, H, W = self.shape
+        cy = (H - 1) / 2.0
+        cx = (W - 1) / 2.0
+        hh = max(1.0, cy - padding_voxels)
+        hw = max(1.0, cx - padding_voxels)
+
+        norm_shape = shape.lower().strip()
+        if norm_shape in ("circle", "disc", "cylinder"):
+            r = min(hh, hw)
+            sdf_2d = sdf_disc(H, W, cy, cx, r)
+        elif norm_shape in ("rounded_rect", "round_rect", "smooth_box"):
+            sdf_2d = sdf_rounded_rect(H, W, cy, cx, hh, hw, corner_radius)
+        elif norm_shape in ("box", "rect", "rectangle"):
+            sdf_2d = sdf_rect(H, W, cy, cx, hh, hw)
+        else:
+            raise ValueError(
+                f"Unknown boundary shape '{shape}'. Choose from: 'rounded_rect', 'circle', 'box'."
+            )
+
+        # Outer shape mask: 1.0 inside boundary (sdf <= 0), smooth falloff outside
+        outer_mask = sdf_to_intensity(sdf_2d, edge_width=0.6)
+
+        norm_mode = mode.lower().strip()
+        if norm_mode == "monolith":
+            # Mask volume strictly inside outer shape
+            out_data = self.data * outer_mask[np.newaxis, :, :]
+
+        elif norm_mode == "framed":
+            # Exact Euclidean SDF of the framing bezel wall/tube
+            d_wall = np.maximum(sdf_2d, -sdf_2d - float(bezel_voxels))
+            d_cavity = sdf_2d + float(bezel_voxels)
+
+            wall_int = sdf_to_intensity(d_wall, edge_width=0.6)
+            wall_int[d_wall <= 0.0] = 1.0
+            wall_int = wall_int * outer_mask
+
+            cavity_int = sdf_to_intensity(d_cavity, edge_width=0.6)
+            cavity_int[d_cavity <= 0.0] = 1.0
+
+            framed_2d_wall = float(fill_density) * wall_int
+            cavity_data = self.data * cavity_int[np.newaxis, :, :]
+            out_data = (
+                np.maximum(framed_2d_wall[np.newaxis, :, :], cavity_data)
+                * outer_mask[np.newaxis, :, :]
+            )
+
+        elif norm_mode in ("solid_relief", "relief"):
+            # Solid block inside footprint with video intensity relief
+            base_relief = np.clip(self.data * 0.65 + float(fill_density) * 0.35, 0.0, 1.0)
+            out_data = base_relief * outer_mask[np.newaxis, :, :]
+
+        else:
+            raise ValueError(
+                f"Unknown boundary mode '{mode}'. Choose from: 'framed', 'monolith', 'solid_relief'."
+            )
+
+        # Optional bottom base plate / pedestal for 3D print stability
+        if base_plate_slices > 0:
+            n_base = min(T, int(base_plate_slices))
+            out_data[:n_base] = np.maximum(
+                out_data[:n_base], float(fill_density) * outer_mask[np.newaxis, :, :]
+            )
+
+        out_data = np.ascontiguousarray(np.clip(out_data, 0.0, 1.0), dtype=np.float32)
+        out_data[out_data < 1e-5] = 0.0
+
+        new_meta = {
+            **self.meta,
+            "has_constant_boundary": True,
+            "boundary_shape": norm_shape,
+            "boundary_mode": norm_mode,
+            "boundary_bezel_vox": bezel_voxels,
+            "boundary_corner_radius": corner_radius,
+            "base_plate_slices": base_plate_slices,
+        }
+        return SpaceTimeVolume(out_data, new_meta)
+
     def save(self, path: Union[str, Path]) -> Path:
         """Save the volume and its metadata to a compressed `.npz` archive."""
         out_path = Path(path)

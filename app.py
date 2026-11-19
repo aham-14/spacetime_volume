@@ -152,6 +152,11 @@ def build_viewer(
         hollow_th = float(params.get("hollow_wall_thickness", 3.0))
         drain = bool(params.get("auto_drain_holes", True))
         two_piece = bool(params.get("two_piece_mold", False))
+        const_bound = params.get("constant_boundary", None)
+        bound_mode = params.get("boundary_mode", "framed")
+        bound_bezel = float(params.get("boundary_bezel", 4.0))
+        bound_cr = float(params.get("boundary_corner_radius", 8.0))
+        base_slices = int(params.get("base_plate_slices", 0))
         prog_cb = params.get("progress_callback", None)
 
         exporter = MeshExporter(
@@ -166,6 +171,11 @@ def build_viewer(
             as_hollow=is_hollow,
             hollow_wall_thickness=hollow_th,
             auto_drain_holes=drain,
+            constant_boundary=const_bound,
+            boundary_mode=bound_mode,
+            boundary_bezel=bound_bezel,
+            boundary_corner_radius=bound_cr,
+            base_plate_slices=base_slices,
         )
 
         if two_piece and is_mold:
@@ -186,6 +196,11 @@ def build_viewer(
             as_hollow=is_hollow,
             hollow_wall_thickness=hollow_th,
             auto_drain_holes=drain,
+            constant_boundary=const_bound,
+            boundary_mode=bound_mode,
+            boundary_bezel=bound_bezel,
+            boundary_corner_radius=bound_cr,
+            base_plate_slices=base_slices,
             progress_callback=prog_cb,
         )
 

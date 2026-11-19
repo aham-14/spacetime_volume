@@ -27,6 +27,7 @@ import numpy as np
 __all__ = [
     "sdf_disc",
     "sdf_rect",
+    "sdf_rounded_rect",
     "sdf_ring",
     "sdf_capsule",
     "sdf_union",
@@ -57,6 +58,31 @@ def sdf_rect(h: int, w: int, cy: float, cx: float, hh: float, hw: float) -> np.n
     outside = np.sqrt(np.maximum(dx, 0.0) ** 2 + np.maximum(dy, 0.0) ** 2)
     inside  = np.minimum(np.maximum(dx, dy), 0.0)
     return (outside + inside).astype(np.float32)
+
+
+def sdf_rounded_rect(
+    h: int,
+    w: int,
+    cy: float,
+    cx: float,
+    hh: float,
+    hw: float,
+    r: float = 8.0,
+) -> np.ndarray:
+    """Exact Euclidean Signed Distance Field (SDF) of a rounded rectangle.
+
+    h, w : grid dimensions
+    cy, cx : center coordinates
+    hh, hw : half-height and half-width of the total outer bounding box
+    r : corner radius (clamped to [0, min(hh, hw)])
+    """
+    r_clamped = float(np.clip(r, 0.0, min(hh, hw)))
+    ys, xs = np.mgrid[0:h, 0:w]
+    qy = np.abs(ys - cy) - hh + r_clamped
+    qx = np.abs(xs - cx) - hw + r_clamped
+    outside = np.sqrt(np.maximum(qx, 0.0) ** 2 + np.maximum(qy, 0.0) ** 2)
+    inside = np.minimum(np.maximum(qx, qy), 0.0)
+    return (outside + inside - r_clamped).astype(np.float32)
 
 
 def sdf_ring(h: int, w: int, cy: float, cx: float, r_outer: float, r_inner: float) -> np.ndarray:
