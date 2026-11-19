@@ -110,6 +110,8 @@ class TestAPI(unittest.TestCase):
                         "interp_factor": "2",
                         "max_frames": "16",
                         "max_dimension": "128",
+                        "start_frame": "0",
+                        "end_frame": "12",
                     },
                 )
             self.assertEqual(res.status_code, 200)
@@ -117,6 +119,27 @@ class TestAPI(unittest.TestCase):
             self.assertEqual(data["status"], "success")
             self.assertIn("shape", data)
             self.assertIn("duration_s", data)
+            self.assertIn("probe", data)
+            self.assertTrue(data["probe"]["valid"])
+
+        # Test video probe endpoint
+        res_probe = self.client.get("/api/video/probe")
+        self.assertEqual(res_probe.status_code, 200)
+        probe_data = res_probe.json()
+        self.assertTrue(probe_data.get("exists", False))
+
+        # Test video trim endpoint
+        res_trim = self.client.post("/api/video/trim", json={
+            "start_frame": 2,
+            "end_frame": 8,
+            "max_frames": 0,
+            "max_dimension": 128,
+            "use_flow": False,
+        })
+        self.assertEqual(res_trim.status_code, 200)
+        trim_data = res_trim.json()
+        self.assertEqual(trim_data["status"], "success")
+        self.assertEqual(trim_data["shape"][0], 6)  # 8 - 2 = 6 frames
 
 
 if __name__ == "__main__":

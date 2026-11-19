@@ -36,6 +36,7 @@ from engine import (
 OUTPUT_DIR = Path("output")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 CURRENT_VIDEO_PATH = OUTPUT_DIR / "current_video.mp4"
+UPLOADED_VIDEO_PATH = OUTPUT_DIR / "uploaded_source.mp4"
 
 app = FastAPI(
     title="Space-Time Volume 4D-to-3D Engine",
@@ -120,6 +121,15 @@ class ProceduralRequest(BaseModel):
     n_frames: int = Field(24, ge=2, le=300)
     easing: str = Field("ease-in-out cubic")
     edge_width: float = Field(2.5, ge=0.5, le=10.0)
+
+
+class TrimRequest(BaseModel):
+    start_frame: int = 0
+    end_frame: int = 0  # 0 = all
+    max_frames: int = 0  # 0 = all frames in trim
+    max_dimension: int = 320
+    use_flow: bool = True
+    interp_factor: int = 2
 
 
 class ExportRequest(BaseModel):
@@ -212,34 +222,39 @@ async def upload_video(
     file: UploadFile = File(...),
     use_flow: bool = Form(True),
     interp_factor: int = Form(2),
-    max_frames: int = Form(48),
+    max_frames: int = Form(0),
     max_dimension: int = Form(320),
+    start_frame: int = Form(0),
+    end_frame: int = Form(0),
 ):
     try:
         t0 = time.time()
         content = await file.read()
-        with open(CURRENT_VIDEO_PATH, "wb") as f:
+        with open(UPLOADED_VIDEO_PATH, "wb") as f:
             f.write(content)
+
+        probe_info = VideoIngestor.probe_video(UPLOADED_VIDEO_PATH)
 
         m_frames = max_frames if max_frames > 0 else None
         m_dim = max_dimension if max_dimension > 0 else None
+        e_frame = end_frame if end_frame > 0 else None
 
         ingestor = VideoIngestor(
             max_frames=m_frames,
             max_dimension=m_dim,
             auto_stride=True,
+            start_frame=start_frame,
+            end_frame=e_frame,
         )
-        raw_vol = ingestor.load(CURRENT_VIDEO_PATH)
+        raw_vol = ingestor.load(UPLOADED_VIDEO_PATH)
 
         if use_flow and raw_vol.n_frames >= 2:
-            # Use DIS optical flow which is 5x faster than Farneback
             interpolator = OpticalFlowInterpolator(interp_factor=interp_factor, method="dis")
             vol = interpolator.interpolate(raw_vol)
         else:
             vol = raw_vol
 
         _SESSION["active_volume"] = vol
-        _sync_volume_to_video(vol, CURRENT_VIDEO_PATH)
         preview = _generate_preview_glb(vol)
         duration_s = round(time.time() - t0, 2)
         return {
@@ -248,6 +263,7 @@ async def upload_video(
             "shape": vol.shape,
             "n_frames": vol.n_frames,
             "duration_s": duration_s,
+            "probe": probe_info,
             "video_url": "/api/video/source",
             "preview": preview,
         }
@@ -255,11 +271,60 @@ async def upload_video(
         raise HTTPException(status_code=400, detail=f"Failed to ingest video: {exc}")
 
 
+@app.post("/api/video/trim")
+def trim_video(req: TrimRequest):
+    if not UPLOADED_VIDEO_PATH.exists():
+        raise HTTPException(status_code=400, detail="No uploaded video found. Please upload an MP4 first.")
+    try:
+        t0 = time.time()
+        m_frames = req.max_frames if req.max_frames > 0 else None
+        m_dim = req.max_dimension if req.max_dimension > 0 else None
+        e_frame = req.end_frame if req.end_frame > 0 else None
+
+        ingestor = VideoIngestor(
+            max_frames=m_frames,
+            max_dimension=m_dim,
+            auto_stride=True,
+            start_frame=req.start_frame,
+            end_frame=e_frame,
+        )
+        raw_vol = ingestor.load(UPLOADED_VIDEO_PATH)
+
+        if req.use_flow and raw_vol.n_frames >= 2:
+            interpolator = OpticalFlowInterpolator(interp_factor=req.interp_factor, method="dis")
+            vol = interpolator.interpolate(raw_vol)
+        else:
+            vol = raw_vol
+
+        _SESSION["active_volume"] = vol
+        preview = _generate_preview_glb(vol)
+        duration_s = round(time.time() - t0, 2)
+        return {
+            "status": "success",
+            "shape": vol.shape,
+            "n_frames": vol.n_frames,
+            "duration_s": duration_s,
+            "preview": preview,
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to trim video: {exc}")
+
+
+@app.get("/api/video/probe")
+def probe_video_endpoint():
+    if UPLOADED_VIDEO_PATH.exists():
+        return VideoIngestor.probe_video(UPLOADED_VIDEO_PATH)
+    return {"exists": False}
+
+
 @app.get("/api/video/source")
 def get_video_source():
-    if not CURRENT_VIDEO_PATH.exists():
-        vol = _get_active_volume()
-        _sync_volume_to_video(vol, CURRENT_VIDEO_PATH)
+    if UPLOADED_VIDEO_PATH.exists():
+        return FileResponse(UPLOADED_VIDEO_PATH, media_type="video/mp4")
+    if CURRENT_VIDEO_PATH.exists():
+        return FileResponse(CURRENT_VIDEO_PATH, media_type="video/mp4")
+    vol = _get_active_volume()
+    _sync_volume_to_video(vol, CURRENT_VIDEO_PATH)
     return FileResponse(CURRENT_VIDEO_PATH, media_type="video/mp4")
 
 
@@ -522,20 +587,44 @@ def index_page():
         </div>
 
         <div id="controls_video" style="display:none;">
-          <div class="checkbox-field">
-            <input type="checkbox" id="video_use_flow" checked>
-            <label for="video_use_flow">DIS Optical Flow (2× Sub-frames)</label>
+          <div style="margin-bottom: 10px;">
+            <label style="display:block; margin-bottom:4px; font-weight:bold; color:#60a5fa;">Upload MP4 / MOV Video:</label>
+            <input type="file" id="video_file_input" accept="video/mp4,video/*" style="font-size:0.75rem; width:100%;">
           </div>
-          <div class="field" style="margin-top:6px;">
-            <label>Slices across Video:</label>
+
+          <!-- Video Metadata & Specs Card -->
+          <div id="video_meta_box" style="display:none; background:#0f172a; border:1px solid #3b82f6; border-radius:6px; padding:10px; margin-bottom:10px;">
+            <div style="font-size:0.75rem; font-weight:bold; color:#60a5fa; margin-bottom:4px;">📊 Video File Specs</div>
+            <div id="lbl_video_specs" style="font-size:0.75rem; color:#cbd5e1;">-</div>
+          </div>
+
+          <!-- Frame Trimming Range -->
+          <div class="panel" style="background:#0f111a; border:1px dashed #475569; padding:10px; margin-bottom:10px;">
+            <div style="font-size:0.8rem; font-weight:bold; color:#f1f5f9; margin-bottom:6px;">✂ Video Frame Trimming</div>
+            <div style="display:flex; gap:8px;">
+              <div class="field" style="flex:1;">
+                <label style="font-size:0.7rem;">Start Frame:</label>
+                <input type="number" id="trim_start" min="0" value="0">
+              </div>
+              <div class="field" style="flex:1;">
+                <label style="font-size:0.7rem;">End Frame (0=End):</label>
+                <input type="number" id="trim_end" min="0" value="0">
+              </div>
+            </div>
+            <button class="btn-primary" id="btn_apply_trim" style="margin-top:6px; padding:6px 10px; font-size:0.8rem; background:#0284c7;">✂ Apply Trim & Re-Volume</button>
+          </div>
+
+          <div class="field">
+            <label>Slices across Video / Trim:</label>
             <select id="video_max_frames">
-              <option value="36">36 slices (Blazing Fast)</option>
-              <option value="48" selected>48 slices (Recommended)</option>
+              <option value="0" selected>All Frames (1:1 with Video — Default)</option>
+              <option value="48">48 slices (Balanced Slices)</option>
               <option value="72">72 slices (High Detail)</option>
               <option value="120">120 slices (Fine Layer)</option>
-              <option value="0">All Frames (Full Video)</option>
+              <option value="36">36 slices (Blazing Fast)</option>
             </select>
           </div>
+
           <div class="field">
             <label>Processing Resolution:</label>
             <select id="video_max_dimension">
@@ -544,11 +633,13 @@ def index_page():
               <option value="0">Original Resolution</option>
             </select>
           </div>
-          <button class="btn-secondary" id="btn_synthetic_video">🎥 Load Orbiting Synthetic Video</button>
-          <div style="margin-top: 8px;">
-            <label style="display:block; margin-bottom:4px; font-weight:bold;">Upload MP4 / MOV Video:</label>
-            <input type="file" id="video_file_input" accept="video/mp4,video/*" style="font-size:0.75rem; width:100%;">
+
+          <div class="checkbox-field">
+            <input type="checkbox" id="video_use_flow" checked>
+            <label for="video_use_flow">DIS Optical Flow (2× Sub-frames)</label>
           </div>
+
+          <button class="btn-secondary" id="btn_synthetic_video">🎥 Load Orbiting Synthetic Video</button>
         </div>
       </div>
 
@@ -564,6 +655,41 @@ def index_page():
             <option value="ply">PLY (.ply) — Point/Mesh</option>
           </select>
         </div>
+
+        <div class="field">
+          <label>Constant Shape Boundary (Frame Fit):</label>
+          <select id="constant_boundary">
+            <option value="None">None (Raw Isosurface)</option>
+            <option value="rounded_rect" selected>Rounded Rectangle (Consistent Frame)</option>
+            <option value="rectangle">Sharp Rectangle</option>
+            <option value="circle">Circular Cylinder</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label>Boundary Mode:</label>
+          <select id="boundary_mode">
+            <option value="framed" selected>Solid Outer Bezel & Base</option>
+            <option value="mask">Enclosure Mask</option>
+            <option value="shell">Frame Shell</option>
+          </select>
+        </div>
+
+        <div style="display:flex; gap:8px;">
+          <div class="field" style="flex:1;">
+            <label style="font-size:0.7rem;">Frame Bezel (mm):</label>
+            <input type="number" id="boundary_bezel" value="3.0" step="0.5" min="1.0" max="15.0">
+          </div>
+          <div class="field" style="flex:1;">
+            <label style="font-size:0.7rem;">Corner Radius (mm):</label>
+            <input type="number" id="boundary_corner_radius" value="6.0" step="1.0" min="0.0" max="30.0">
+          </div>
+          <div class="field" style="flex:1;">
+            <label style="font-size:0.7rem;">Base Slices:</label>
+            <input type="number" id="base_plate_slices" value="2" min="0" max="10">
+          </div>
+        </div>
+
         <div class="field">
           <label>Isosurface Level:</label>
           <input type="range" id="level" min="0.1" max="0.9" step="0.05" value="0.5">
@@ -598,14 +724,15 @@ def index_page():
     <!-- Central Workspace: 3D Viewport + Right Dock Video Monitor -->
     <div class="workspace">
       <div class="viewport-3d" style="position:relative;">
-        <!-- Floating Orientation & Full Grab Toolbar -->
+        <!-- Floating Orientation & Full 360 Grab Toolbar -->
         <div style="position:absolute; top:12px; left:12px; z-index:10; display:flex; gap:6px; flex-wrap:wrap; background:rgba(15,23,42,0.85); padding:6px 10px; border-radius:8px; border:1px solid #334155; backdrop-filter:blur(8px);">
-          <button id="btn_cam_reset" style="padding:4px 8px; font-size:0.75rem; background:#1e293b; color:#cbd5e1; border:1px solid #475569; border-radius:4px; cursor:pointer;" title="Reset Camera Orbit">🔄 Reset</button>
+          <button id="btn_cam_reset" style="padding:4px 8px; font-size:0.75rem; background:#1e293b; color:#cbd5e1; border:1px solid #475569; border-radius:4px; cursor:pointer;" title="Reset Camera Orbit">🔄 Reset Orbit</button>
           <button id="btn_cam_top" style="padding:4px 8px; font-size:0.75rem; background:#1e293b; color:#cbd5e1; border:1px solid #475569; border-radius:4px; cursor:pointer;" title="Top View (XY Slice Plane)">📐 Top</button>
           <button id="btn_cam_front" style="padding:4px 8px; font-size:0.75rem; background:#1e293b; color:#cbd5e1; border:1px solid #475569; border-radius:4px; cursor:pointer;" title="Front View (Z-axis Extrusion)">👤 Front</button>
           <button id="btn_cam_side" style="padding:4px 8px; font-size:0.75rem; background:#1e293b; color:#cbd5e1; border:1px solid #475569; border-radius:4px; cursor:pointer;" title="Side Profile">↔ Side</button>
-          <button id="btn_cam_rot" style="padding:4px 8px; font-size:0.75rem; background:#1e293b; color:#cbd5e1; border:1px solid #475569; border-radius:4px; cursor:pointer;" title="Rotate 90°">↻ 90°</button>
-          <button id="btn_flip_v" style="padding:4px 8px; font-size:0.75rem; background:#3b82f6; color:#ffffff; border:1px solid #60a5fa; border-radius:4px; cursor:pointer; font-weight:bold;" title="Flip / Un-invert Vertical Orientation">↕ Un-invert / Flip</button>
+          <button id="btn_cam_rot" style="padding:4px 8px; font-size:0.75rem; background:#1e293b; color:#cbd5e1; border:1px solid #475569; border-radius:4px; cursor:pointer;" title="Rotate 90° Yaw">↻ 90° Orbit</button>
+          <button id="btn_flip_v" style="padding:4px 8px; font-size:0.75rem; background:#2563eb; color:#ffffff; border:1px solid #3b82f6; border-radius:4px; cursor:pointer; font-weight:bold;" title="Flip Model Vertically (Un-invert / Invert)">↕ Flip Vertical</button>
+          <button id="btn_roll_model" style="padding:4px 8px; font-size:0.75rem; background:#1e293b; color:#cbd5e1; border:1px solid #475569; border-radius:4px; cursor:pointer;" title="Rotate Model Pitch / Roll">🔃 Roll 180°</button>
         </div>
 
         <model-viewer
@@ -614,10 +741,9 @@ def index_page():
           camera-controls
           touch-action="none"
           interaction-prompt="none"
-          min-camera-orbit="auto -180deg auto"
-          max-camera-orbit="auto 180deg auto"
-          min-field-of-view="5deg"
-          max-field-of-view="140deg"
+          min-camera-orbit="auto -Infinity auto"
+          max-camera-orbit="auto Infinity auto"
+          interpolation-decay="100"
           shadow-intensity="1"
           ar>
         </model-viewer>
@@ -643,7 +769,10 @@ def index_page():
           <!-- Screen Box -->
           <div class="video-screen-box">
             <img id="slice_screen" src="/api/video/frame/0" alt="2D Time Slice">
-            <video id="video_screen" src="/api/video/source" controls loop autoplay style="display:none;"></video>
+            <video id="video_screen" src="/api/video/source" playsinline controls loop style="display:none;"></video>
+            <div id="video_placeholder" style="display:none; color:#94a3b8; font-size:0.8rem; text-align:center; padding:16px;">
+              📁 No native MP4 uploaded yet.<br>Upload an MP4 video above to watch in the native player.
+            </div>
           </div>
 
           <!-- Time Scrubber Controls -->
@@ -682,12 +811,22 @@ def index_page():
     const tabVideo = document.getElementById('tab_video');
     const sliceScreen = document.getElementById('slice_screen');
     const videoScreen = document.getElementById('video_screen');
+    const videoPlaceholder = document.getElementById('video_placeholder');
     const scrubberPanel = document.getElementById('scrubber_panel');
 
     const timeSlider = document.getElementById('time_slider');
     const btnPlay = document.getElementById('btn_play');
     const lblFrameIdx = document.getElementById('lbl_frame_idx');
     const lblZHeight = document.getElementById('lbl_z_height');
+
+    const videoMetaBox = document.getElementById('video_meta_box');
+    const lblVideoSpecs = document.getElementById('lbl_video_specs');
+    const trimStart = document.getElementById('trim_start');
+    const trimEnd = document.getElementById('trim_end');
+    const btnApplyTrim = document.getElementById('btn_apply_trim');
+    const videoMaxFrames = document.getElementById('video_max_frames');
+    const videoMaxDim = document.getElementById('video_max_dimension');
+    const videoUseFlow = document.getElementById('video_use_flow');
 
     const levelSlider = document.getElementById('level');
     const levelVal = document.getElementById('level_val');
@@ -696,6 +835,27 @@ def index_page():
     let totalFrames = 24;
     let isPlaying = false;
     let playTimer = null;
+    let isFlipped = false;
+    let currentRoll = 0;
+
+    // Probe existing video on page load
+    async function probeExistingVideo() {{
+      try {{
+        const res = await fetch('/api/video/probe');
+        if (res.ok) {{
+          const info = await res.json();
+          if (info.exists && info.valid) {{
+            videoMetaBox.style.display = 'block';
+            lblVideoSpecs.innerText = `${{info.width}}×${{info.height}} | ${{info.total_frames}} frames | ${{info.fps}} fps (${{info.duration_s}}s)`;
+            trimStart.max = info.total_frames - 1;
+            trimEnd.max = info.total_frames;
+            if (parseInt(trimEnd.value) === 0) trimEnd.value = info.total_frames;
+            videoMaxFrames.options[0].text = `All ${{info.total_frames}} frames (1:1 with video — Default)`;
+          }}
+        }}
+      }} catch (_) {{}}
+    }}
+    probeExistingVideo();
 
     // Toggle Monitor Panel
     btnToggleMonitor.onclick = () => {{
@@ -709,15 +869,24 @@ def index_page():
       tabVideo.classList.remove('active');
       sliceScreen.style.display = 'block';
       videoScreen.style.display = 'none';
+      videoPlaceholder.style.display = 'none';
       scrubberPanel.style.display = 'flex';
     }};
     tabVideo.onclick = () => {{
       tabVideo.classList.add('active');
       tabSlice.classList.remove('active');
-      videoScreen.style.display = 'block';
       sliceScreen.style.display = 'none';
-      scrubberPanel.style.display = 'none';
-      videoScreen.play();
+      scrubberPanel.style.display = 'flex'; // scrubber stays available to navigate frames
+      videoScreen.style.display = 'block';
+      videoPlaceholder.style.display = 'none';
+      videoScreen.play().catch(() => {{
+        // Autoplay may be blocked by browser policy until user interacts
+      }});
+    }};
+
+    videoScreen.onerror = () => {{
+      videoScreen.style.display = 'none';
+      videoPlaceholder.style.display = 'block';
     }};
 
     // Mode Selector
@@ -735,8 +904,11 @@ def index_page():
     function updateFrame(t) {{
       timeSlider.value = t;
       sliceScreen.src = `/api/video/frame/${{t}}?_t=${{Date.now()}}`;
-      lblFrameIdx.innerText = `Time (Z): Frame ${{t}} / ${{totalFrames - 1}}`;
+      lblFrameIdx.innerText = `Time (Z): Frame ${{t}} / ${{Math.max(1, totalFrames - 1)}}`;
       lblZHeight.innerText = `Z = ${{(t * 0.5).toFixed(1)}} mm`;
+      if (videoScreen && videoScreen.duration && !isNaN(videoScreen.duration)) {{
+        videoScreen.currentTime = (t / Math.max(1, totalFrames - 1)) * videoScreen.duration;
+      }}
     }}
 
     timeSlider.oninput = (e) => {{
@@ -803,7 +975,6 @@ def index_page():
         totalFrames = data.shape[0];
         timeSlider.max = totalFrames - 1;
         updateFrame(0);
-        videoScreen.src = `/api/video/source?_t=${{Date.now()}}`;
         update3DPreview(data.preview);
         statusMsg.innerHTML = `<span style="color:#4ade80;">✔ Procedural volume & 3D mass updated: ${{data.shape.join(' × ')}} voxels</span>`;
       }} catch (err) {{
@@ -819,7 +990,7 @@ def index_page():
           method: 'POST',
           headers: {{ 'Content-Type': 'application/json' }},
           body: JSON.stringify({{
-            use_flow: document.getElementById('video_use_flow').checked,
+            use_flow: videoUseFlow.checked,
             interp_factor: 2
           }})
         }});
@@ -833,6 +1004,8 @@ def index_page():
         timeSlider.max = totalFrames - 1;
         updateFrame(0);
         videoScreen.src = `/api/video/source?_t=${{Date.now()}}`;
+        videoScreen.style.display = 'block';
+        videoPlaceholder.style.display = 'none';
         update3DPreview(data.preview);
         statusMsg.innerHTML = `<span style="color:#4ade80;">✔ Synthetic video volume & 3D mass ready: ${{data.shape.join(' × ')}} (${{data.duration_s || 0.1}}s)</span>`;
       }} catch (err) {{
@@ -844,14 +1017,16 @@ def index_page():
     document.getElementById('video_file_input').onchange = async (e) => {{
       const file = e.target.files[0];
       if (!file) return;
-      statusMsg.innerHTML = `<span style="color:#60a5fa;'>⏳ Ingesting ${{file.name}}, computing flow & updating 3D mass...</span>`;
+      statusMsg.innerHTML = `<span style="color:#60a5fa;'>⏳ Ingesting ${{file.name}}, inspecting frames & computing volume...</span>`;
       try {{
         const formData = new FormData();
         formData.append('file', file);
-        formData.append('use_flow', document.getElementById('video_use_flow').checked);
+        formData.append('use_flow', videoUseFlow.checked);
         formData.append('interp_factor', 2);
-        formData.append('max_frames', parseInt(document.getElementById('video_max_frames').value));
-        formData.append('max_dimension', parseInt(document.getElementById('video_max_dimension').value));
+        formData.append('max_frames', parseInt(videoMaxFrames.value));
+        formData.append('max_dimension', parseInt(videoMaxDim.value));
+        formData.append('start_frame', parseInt(trimStart.value || 0));
+        formData.append('end_frame', parseInt(trimEnd.value || 0));
 
         const res = await fetch('/api/upload/video', {{
           method: 'POST',
@@ -866,7 +1041,23 @@ def index_page():
         totalFrames = data.shape[0];
         timeSlider.max = totalFrames - 1;
         updateFrame(0);
+
+        // Update video probe metadata & trimming inputs
+        if (data.probe && data.probe.valid) {{
+          videoMetaBox.style.display = 'block';
+          lblVideoSpecs.innerText = `${{data.probe.width}}×${{data.probe.height}} | ${{data.probe.total_frames}} frames | ${{data.probe.fps}} fps (${{data.probe.duration_s}}s)`;
+          trimStart.value = 0;
+          trimStart.max = data.probe.total_frames - 1;
+          trimEnd.value = data.probe.total_frames;
+          trimEnd.max = data.probe.total_frames;
+          videoMaxFrames.options[0].text = `All ${{data.probe.total_frames}} frames (1:1 with video — Default)`;
+        }}
+
+        // Update authentic video player
         videoScreen.src = `/api/video/source?_t=${{Date.now()}}`;
+        videoScreen.style.display = 'block';
+        videoPlaceholder.style.display = 'none';
+
         update3DPreview(data.preview);
         statusMsg.innerHTML = `<span style="color:#4ade80;">✔ Ingested ${{data.filename}} & updated 3D mass (${{data.shape.join(' × ')}} in ${{data.duration_s}}s)</span>`;
       }} catch (err) {{
@@ -874,11 +1065,53 @@ def index_page():
       }}
     }};
 
+    // Video Trimming & Re-Voluming
+    btnApplyTrim.onclick = async () => {{
+      statusMsg.innerHTML = "<span style='color:#60a5fa;'>⏳ Applying trim & re-computing 3D volume...</span>";
+      try {{
+        const res = await fetch('/api/video/trim', {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify({{
+            start_frame: parseInt(trimStart.value || 0),
+            end_frame: parseInt(trimEnd.value || 0),
+            max_frames: parseInt(videoMaxFrames.value),
+            max_dimension: parseInt(videoMaxDim.value),
+            use_flow: videoUseFlow.checked,
+            interp_factor: 2
+          }})
+        }});
+        if (!res.ok) {{
+          const err = await res.json();
+          statusMsg.innerHTML = `<span style="color:#f87171;">❌ Trim failed: ${{err.detail || 'Server error'}}</span>`;
+          return;
+        }}
+        const data = await res.json();
+        totalFrames = data.shape[0];
+        timeSlider.max = totalFrames - 1;
+        updateFrame(0);
+        update3DPreview(data.preview);
+        statusMsg.innerHTML = `<span style="color:#4ade80;">✔ Re-volumed trim [${{trimStart.value}} - ${{trimEnd.value || 'End'}}]: ${{data.shape.join(' × ')}} voxels in ${{data.duration_s}}s</span>`;
+      }} catch (err) {{
+        statusMsg.innerHTML = `<span style="color:#f87171;">❌ Trim error: ${{err.message}}</span>`;
+      }}
+    }};
+
     // 3D Mesh Export
     document.getElementById('btn_export').onclick = async () => {{
       statusMsg.innerHTML = "<span style='color:#60a5fa;'>⏳ Extracting & smoothing 3D mesh...</span>";
       const fmt = document.getElementById('format').value;
-      const bShape = document.getElementById('constant_boundary').value;
+      const bShapeElem = document.getElementById('constant_boundary');
+      const bShape = bShapeElem ? bShapeElem.value : 'None';
+      const bModeElem = document.getElementById('boundary_mode');
+      const bMode = bModeElem ? bModeElem.value : 'framed';
+      const bBezelElem = document.getElementById('boundary_bezel');
+      const bBezel = bBezelElem ? parseFloat(bBezelElem.value) : 3.0;
+      const bRadiusElem = document.getElementById('boundary_corner_radius');
+      const bRadius = bRadiusElem ? parseFloat(bRadiusElem.value) : 6.0;
+      const bBaseElem = document.getElementById('base_plate_slices');
+      const bBase = bBaseElem ? parseInt(bBaseElem.value) : 2;
+
       try {{
         const res = await fetch('/api/export', {{
           method: 'POST',
@@ -889,9 +1122,10 @@ def index_page():
             as_hollow: document.getElementById('as_hollow').checked,
             as_negative_mold: document.getElementById('as_mold').checked,
             constant_boundary: bShape !== 'None' ? bShape : null,
-            boundary_mode: document.getElementById('boundary_mode').value,
-            boundary_bezel: parseFloat(document.getElementById('boundary_bezel').value),
-            base_plate_slices: parseInt(document.getElementById('base_plate_slices').value),
+            boundary_mode: bMode,
+            boundary_bezel: bBezel,
+            boundary_corner_radius: bRadius,
+            base_plate_slices: bBase,
             uninvert_y: document.getElementById('uninvert_y').checked,
             invert_z: document.getElementById('invert_z').checked
           }})
@@ -947,10 +1181,18 @@ def index_page():
     }};
 
     document.getElementById('btn_flip_v').onclick = () => {{
+      isFlipped = !isFlipped;
+      // Instant model rotation in Three.js/WebGL
+      viewer.orientation = `${{isFlipped ? 180 : 0}}deg 0deg ${{currentRoll}}deg`;
       const chk = document.getElementById('uninvert_y');
-      chk.checked = !chk.checked;
-      statusMsg.innerHTML = `<span style="color:#60a5fa;'>⏳ Flipping volume vertical orientation (un-invert=${{chk.checked}})...</span>`;
-      document.getElementById('btn_export').click();
+      if (chk) chk.checked = !isFlipped;
+      statusMsg.innerHTML = `<span style="color:#60a5fa;'>↕ Model vertical orientation flipped (pitch=${{isFlipped ? '180°' : '0°'}})</span>`;
+    }};
+
+    document.getElementById('btn_roll_model').onclick = () => {{
+      currentRoll = (currentRoll + 180) % 360;
+      viewer.orientation = `${{isFlipped ? 180 : 0}}deg 0deg ${{currentRoll}}deg`;
+      statusMsg.innerHTML = `<span style="color:#60a5fa;'>🔃 Model roll rotated to ${{currentRoll}}°</span>`;
     }};
   </script>
 </body>
