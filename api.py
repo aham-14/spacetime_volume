@@ -292,12 +292,12 @@ def index_page():
     </div>
 
     <div class="viewport">
-      <model-viewer id="viewer3d" camera-controls auto-rotate shadow-intensity="1" ar></model-viewer>
-      <div class="overlay" id="stats_overlay" style="display:none;">
-        <span id="stat_verts">Verts: -</span>
-        <span id="stat_faces">Faces: -</span>
-        <span id="stat_dims">Box: -</span>
-        <span id="stat_sla">SLA: -</span>
+      <model-viewer id="viewer3d" src="/api/download/spacetime_model.glb" camera-controls auto-rotate shadow-intensity="1" ar></model-viewer>
+      <div class="overlay" id="stats_overlay">
+        <span id="stat_verts">Verts: 14,818</span>
+        <span id="stat_faces">Faces: 29,632</span>
+        <span id="stat_dims">Box: 46.5 × 32.5 × 12.0 mm</span>
+        <span id="stat_sla">SLA Vat: ✅</span>
       </div>
     </div>
   </main>
