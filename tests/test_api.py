@@ -22,6 +22,7 @@ class TestAPI(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         self.assertIn("text/html", res.headers["content-type"])
         self.assertIn("model-viewer", res.text)
+        self.assertIn("video_monitor", res.text)
 
     def test_procedural_generation_endpoint(self):
         res = self.client.post("/api/generate/procedural", json={
@@ -33,6 +34,24 @@ class TestAPI(unittest.TestCase):
         data = res.json()
         self.assertEqual(data["status"], "success")
         self.assertEqual(data["shape"][0], 16)
+
+    def test_video_endpoints(self):
+        # 1. Test video frame retrieval
+        res_frame = self.client.get("/api/video/frame/0")
+        self.assertEqual(res_frame.status_code, 200)
+        self.assertEqual(res_frame.headers["content-type"], "image/jpeg")
+        self.assertGreater(len(res_frame.content), 0)
+
+        # 2. Test video info
+        res_info = self.client.get("/api/video/info")
+        self.assertEqual(res_info.status_code, 200)
+        info = res_info.json()
+        self.assertIn("n_frames", info)
+
+        # 3. Test video source streaming
+        res_vid = self.client.get("/api/video/source")
+        self.assertEqual(res_vid.status_code, 200)
+        self.assertEqual(res_vid.headers["content-type"], "video/mp4")
 
     def test_export_and_download_endpoints(self):
         # Trigger export
