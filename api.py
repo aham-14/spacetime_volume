@@ -57,6 +57,35 @@ _SESSION: Dict[str, Optional[SpaceTimeVolume]] = {
 }
 
 
+def _generate_preview_glb(vol: SpaceTimeVolume) -> dict:
+    """Extract and export realtime 3D GLB preview for <model-viewer>."""
+    out_path = OUTPUT_DIR / "spacetime_model.glb"
+    try:
+        step = 2 if max(vol.shape) > 100 else 1
+        exporter = MeshExporter(
+            level=0.5,
+            step_size=step,
+            smooth_iterations=2,
+            voxel_size=0.5,
+        )
+        stats = exporter.export(vol, out_path)
+        timestamp = int(time.time() * 1000)
+        return {
+            "glb_url": f"/api/download/spacetime_model.glb?_t={timestamp}",
+            "n_vertices": stats.n_vertices,
+            "n_faces": stats.n_faces,
+            "dimensions_mm": [round(float(d), 1) for d in stats.dimensions_mm],
+            "volume_mm3": round(float(stats.volume_mm3), 1),
+            "fits_standard_sla_vat": stats.fits_standard_sla_vat,
+        }
+    except Exception as exc:
+        timestamp = int(time.time() * 1000)
+        return {
+            "glb_url": f"/api/download/spacetime_model.glb?_t={timestamp}",
+            "error": str(exc),
+        }
+
+
 def _sync_volume_to_video(vol: SpaceTimeVolume, path: Path, fps: int = 24) -> None:
     """Encode the SpaceTimeVolume slices as an .mp4 video for browser playback."""
     try:
@@ -128,12 +157,14 @@ def generate_procedural(req: ProceduralRequest):
         vol = gen.generate(n_frames=req.n_frames, transition_function=req.easing)
         _SESSION["active_volume"] = vol
         _sync_volume_to_video(vol, CURRENT_VIDEO_PATH)
+        preview = _generate_preview_glb(vol)
         return {
             "status": "success",
             "shape": vol.shape,
             "meta": vol.meta,
             "intensity_range": [float(vol.data.min()), float(vol.data.max())],
             "video_url": "/api/video/source",
+            "preview": preview,
         }
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -154,6 +185,8 @@ def generate_synthetic_video(use_flow: bool = True, interp_factor: int = 2):
             vol = raw_vol
 
         _SESSION["active_volume"] = vol
+        _sync_volume_to_video(vol, CURRENT_VIDEO_PATH)
+        preview = _generate_preview_glb(vol)
         duration_s = round(time.time() - t0, 2)
         return {
             "status": "success",
@@ -161,6 +194,7 @@ def generate_synthetic_video(use_flow: bool = True, interp_factor: int = 2):
             "n_frames": vol.n_frames,
             "duration_s": duration_s,
             "video_url": "/api/video/source",
+            "preview": preview,
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
@@ -198,6 +232,8 @@ async def upload_video(
             vol = raw_vol
 
         _SESSION["active_volume"] = vol
+        _sync_volume_to_video(vol, CURRENT_VIDEO_PATH)
+        preview = _generate_preview_glb(vol)
         duration_s = round(time.time() - t0, 2)
         return {
             "status": "success",
@@ -206,6 +242,7 @@ async def upload_video(
             "n_frames": vol.n_frames,
             "duration_s": duration_s,
             "video_url": "/api/video/source",
+            "preview": preview,
         }
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Failed to ingest video: {exc}")
@@ -686,24 +723,48 @@ def index_page():
       else startPlayback();
     }};
 
+    function update3DPreview(preview) {{
+      if (preview && preview.glb_url) {{
+        viewer.src = preview.glb_url;
+        if (preview.n_vertices) {{
+          overlay.style.display = 'flex';
+          document.getElementById('stat_verts').innerText = `Verts: ${{preview.n_vertices.toLocaleString()}}`;
+          document.getElementById('stat_faces').innerText = `Faces: ${{preview.n_faces.toLocaleString()}}`;
+          const d = preview.dimensions_mm;
+          document.getElementById('stat_dims').innerText = `Box: ${{d[0]}} × ${{d[1]}} × ${{d[2]}} mm`;
+          document.getElementById('stat_sla').innerText = preview.fits_standard_sla_vat ? "SLA Vat: ✅" : "SLA Vat: ⚠ Exceeds";
+        }}
+      }}
+    }}
+
     // Procedural Volume Generation
     document.getElementById('btn_generate_proc').onclick = async () => {{
-      statusMsg.innerText = "Generating procedural volume...";
-      const res = await fetch('/api/generate/procedural', {{
-        method: 'POST',
-        headers: {{ 'Content-Type': 'application/json' }},
-        body: JSON.stringify({{
-          n_frames: parseInt(document.getElementById('n_frames').value),
-          easing: document.getElementById('easing').value,
-          edge_width: parseFloat(document.getElementById('edge_width').value)
-        }})
-      }});
-      const data = await res.json();
-      totalFrames = data.shape[0];
-      timeSlider.max = totalFrames - 1;
-      updateFrame(0);
-      videoScreen.src = `/api/video/source?_t=${{Date.now()}}`;
-      statusMsg.innerText = `Volume ready: ${{data.shape.join(' × ')}} voxels`;
+      statusMsg.innerHTML = "<span style='color:#60a5fa;'>⏳ Generating procedural volume & 3D mesh...</span>";
+      try {{
+        const res = await fetch('/api/generate/procedural', {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify({{
+            n_frames: parseInt(document.getElementById('n_frames').value),
+            easing: document.getElementById('easing').value,
+            edge_width: parseFloat(document.getElementById('edge_width').value)
+          }})
+        }});
+        if (!res.ok) {{
+          const err = await res.json();
+          statusMsg.innerHTML = `<span style="color:#f87171;">❌ Generation failed: ${{err.detail || 'Server error'}}</span>`;
+          return;
+        }}
+        const data = await res.json();
+        totalFrames = data.shape[0];
+        timeSlider.max = totalFrames - 1;
+        updateFrame(0);
+        videoScreen.src = `/api/video/source?_t=${{Date.now()}}`;
+        update3DPreview(data.preview);
+        statusMsg.innerHTML = `<span style="color:#4ade80;">✔ Procedural volume & 3D mass updated: ${{data.shape.join(' × ')}} voxels</span>`;
+      }} catch (err) {{
+        statusMsg.innerHTML = `<span style="color:#f87171;">❌ Error: ${{err.message}}</span>`;
+      }}
     }};
 
     // Synthetic Video Load
@@ -728,7 +789,8 @@ def index_page():
         timeSlider.max = totalFrames - 1;
         updateFrame(0);
         videoScreen.src = `/api/video/source?_t=${{Date.now()}}`;
-        statusMsg.innerHTML = `<span style="color:#4ade80;">✔ Synthetic video volume ready: ${{data.shape.join(' × ')}} (${{data.duration_s || 0.1}}s)</span>`;
+        update3DPreview(data.preview);
+        statusMsg.innerHTML = `<span style="color:#4ade80;">✔ Synthetic video volume & 3D mass ready: ${{data.shape.join(' × ')}} (${{data.duration_s || 0.1}}s)</span>`;
       }} catch (err) {{
         statusMsg.innerHTML = `<span style="color:#f87171;">❌ Error: ${{err.message}}</span>`;
       }}
@@ -738,7 +800,7 @@ def index_page():
     document.getElementById('video_file_input').onchange = async (e) => {{
       const file = e.target.files[0];
       if (!file) return;
-      statusMsg.innerHTML = `<span style="color:#60a5fa;">⏳ Ingesting ${{file.name}} & processing optical flow...</span>`;
+      statusMsg.innerHTML = `<span style="color:#60a5fa;'>⏳ Ingesting ${{file.name}}, computing flow & updating 3D mass...</span>`;
       try {{
         const formData = new FormData();
         formData.append('file', file);
@@ -761,7 +823,8 @@ def index_page():
         timeSlider.max = totalFrames - 1;
         updateFrame(0);
         videoScreen.src = `/api/video/source?_t=${{Date.now()}}`;
-        statusMsg.innerHTML = `<span style="color:#4ade80;">✔ Ingested ${{data.filename}} (${{data.shape.join(' × ')}} in ${{data.duration_s}}s)</span>`;
+        update3DPreview(data.preview);
+        statusMsg.innerHTML = `<span style="color:#4ade80;">✔ Ingested ${{data.filename}} & updated 3D mass (${{data.shape.join(' × ')}} in ${{data.duration_s}}s)</span>`;
       }} catch (err) {{
         statusMsg.innerHTML = `<span style="color:#f87171;">❌ Upload error: ${{err.message}}</span>`;
       }}
@@ -796,7 +859,7 @@ def index_page():
         if (data.status === 'success') {{
           statusMsg.innerHTML = `Exported <a href="${{data.download_url}}" download style="color:#60a5fa; font-weight:bold;">Download ${{data.filename}}</a>`;
           if (fmt === 'glb') {{
-            viewer.src = data.download_url;
+            viewer.src = `${{data.download_url}}?_t=${{Date.now()}}`;
           }}
           overlay.style.display = 'flex';
           document.getElementById('stat_verts').innerText = `Verts: ${{data.stats.n_vertices.toLocaleString()}}`;
