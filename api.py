@@ -11,12 +11,13 @@ Run with:
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, File, HTTPException, Response, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
@@ -103,11 +104,6 @@ class ExportRequest(BaseModel):
     step_size: int = Field(1, ge=1, le=4)
     voxel_size_mm: float = Field(0.5, ge=0.05, le=5.0)
     smooth_iterations: int = Field(4, ge=0, le=20)
-    constant_boundary: Optional[str] = Field(None, description="Constant frame shape: None, rounded_rect, circle, box")
-    boundary_mode: str = Field("framed", description="framed, monolith, or solid_relief")
-    boundary_bezel: float = Field(4.0, ge=1.0, le=20.0)
-    boundary_corner_radius: float = Field(8.0, ge=0.0, le=50.0)
-    base_plate_slices: int = Field(0, ge=0, le=20)
 
 
 # ---------------------------------------------------------------------------
@@ -144,11 +140,12 @@ def generate_procedural(req: ProceduralRequest):
 
 
 @app.post("/api/generate/synthetic_video")
-def generate_synthetic_video(use_flow: bool = True, interp_factor: int = 4):
+def generate_synthetic_video(use_flow: bool = True, interp_factor: int = 2):
     try:
+        t0 = time.time()
         write_dummy_mp4(CURRENT_VIDEO_PATH, n=36)
-        ingestor = VideoIngestor(CURRENT_VIDEO_PATH)
-        raw_vol = ingestor.ingest()
+        ingestor = VideoIngestor(max_frames=36, max_dimension=320)
+        raw_vol = ingestor.load(CURRENT_VIDEO_PATH)
 
         if use_flow and raw_vol.n_frames >= 2:
             interpolator = OpticalFlowInterpolator(interp_factor=interp_factor, method="dis")
@@ -157,10 +154,12 @@ def generate_synthetic_video(use_flow: bool = True, interp_factor: int = 4):
             vol = raw_vol
 
         _SESSION["active_volume"] = vol
+        duration_s = round(time.time() - t0, 2)
         return {
             "status": "success",
             "shape": vol.shape,
             "n_frames": vol.n_frames,
+            "duration_s": duration_s,
             "video_url": "/api/video/source",
         }
     except Exception as exc:
@@ -170,29 +169,42 @@ def generate_synthetic_video(use_flow: bool = True, interp_factor: int = 4):
 @app.post("/api/upload/video")
 async def upload_video(
     file: UploadFile = File(...),
-    use_flow: bool = True,
-    interp_factor: int = 4,
+    use_flow: bool = Form(True),
+    interp_factor: int = Form(2),
+    max_frames: int = Form(48),
+    max_dimension: int = Form(320),
 ):
     try:
+        t0 = time.time()
         content = await file.read()
         with open(CURRENT_VIDEO_PATH, "wb") as f:
             f.write(content)
 
-        ingestor = VideoIngestor(CURRENT_VIDEO_PATH)
-        raw_vol = ingestor.ingest()
+        m_frames = max_frames if max_frames > 0 else None
+        m_dim = max_dimension if max_dimension > 0 else None
+
+        ingestor = VideoIngestor(
+            max_frames=m_frames,
+            max_dimension=m_dim,
+            auto_stride=True,
+        )
+        raw_vol = ingestor.load(CURRENT_VIDEO_PATH)
 
         if use_flow and raw_vol.n_frames >= 2:
+            # Use DIS optical flow which is 5x faster than Farneback
             interpolator = OpticalFlowInterpolator(interp_factor=interp_factor, method="dis")
             vol = interpolator.interpolate(raw_vol)
         else:
             vol = raw_vol
 
         _SESSION["active_volume"] = vol
+        duration_s = round(time.time() - t0, 2)
         return {
             "status": "success",
             "filename": file.filename,
             "shape": vol.shape,
             "n_frames": vol.n_frames,
+            "duration_s": duration_s,
             "video_url": "/api/video/source",
         }
     except Exception as exc:
@@ -266,11 +278,6 @@ def export_mesh(req: ExportRequest):
             mold_open_top=req.mold_open_top,
             as_hollow=req.as_hollow,
             hollow_wall_thickness=req.hollow_wall_thickness,
-            constant_boundary=req.constant_boundary,
-            boundary_mode=req.boundary_mode,
-            boundary_bezel=req.boundary_bezel,
-            boundary_corner_radius=req.boundary_corner_radius,
-            base_plate_slices=req.base_plate_slices,
         )
         stats = exporter.export(vol, out_path, level=req.level)
 
@@ -466,11 +473,29 @@ def index_page():
         <div id="controls_video" style="display:none;">
           <div class="checkbox-field">
             <input type="checkbox" id="video_use_flow" checked>
-            <label for="video_use_flow">DIS Optical Flow (4× sub-frames)</label>
+            <label for="video_use_flow">DIS Optical Flow (2× Sub-frames)</label>
+          </div>
+          <div class="field" style="margin-top:6px;">
+            <label>Slices across Video:</label>
+            <select id="video_max_frames">
+              <option value="36">36 slices (Blazing Fast)</option>
+              <option value="48" selected>48 slices (Recommended)</option>
+              <option value="72">72 slices (High Detail)</option>
+              <option value="120">120 slices (Fine Layer)</option>
+              <option value="0">All Frames (Full Video)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Processing Resolution:</label>
+            <select id="video_max_dimension">
+              <option value="320" selected>320 px (Fast Instant 3D)</option>
+              <option value="480">480 px (Balanced Detail)</option>
+              <option value="0">Original Resolution</option>
+            </select>
           </div>
           <button class="btn-secondary" id="btn_synthetic_video">🎥 Load Orbiting Synthetic Video</button>
           <div style="margin-top: 8px;">
-            <label style="display:block; margin-bottom:4px;">Upload MP4 Video:</label>
+            <label style="display:block; margin-bottom:4px; font-weight:bold;">Upload MP4 / MOV Video:</label>
             <input type="file" id="video_file_input" accept="video/mp4,video/*" style="font-size:0.75rem; width:100%;">
           </div>
         </div>
@@ -492,31 +517,6 @@ def index_page():
           <label>Isosurface Level:</label>
           <input type="range" id="level" min="0.1" max="0.9" step="0.05" value="0.5">
           <span id="level_val" style="font-size:0.75rem; color:#94a3b8;">0.50</span>
-        </div>
-        <div class="field">
-          <label>Constant Footprint Frame:</label>
-          <select id="constant_boundary">
-            <option value="None" selected>None (Raw Subject Motion)</option>
-            <option value="rounded_rect">Rounded Rectangle (Smooth Bezel)</option>
-            <option value="circle">Circular / Cylinder</option>
-            <option value="box">Sharp Box</option>
-          </select>
-        </div>
-        <div class="field" id="field_boundary_mode">
-          <label>Enclosure Style:</label>
-          <select id="boundary_mode">
-            <option value="framed" selected>Framed Bezel (Outer Wall + Cavity)</option>
-            <option value="monolith">Monolithic Trim (Prism Boundary)</option>
-            <option value="solid_relief">Solid Relief Column</option>
-          </select>
-        </div>
-        <div class="field" id="field_boundary_bezel">
-          <label>Bezel Wall Width (vox):</label>
-          <input type="number" id="boundary_bezel" value="4.0" step="0.5" min="1.0" max="16.0">
-        </div>
-        <div class="field" id="field_base_plate">
-          <label>Base Raft Slices (Floor):</label>
-          <input type="number" id="base_plate_slices" value="0" min="0" max="10">
         </div>
         <div class="checkbox-field">
           <input type="checkbox" id="as_hollow">
@@ -708,77 +708,107 @@ def index_page():
 
     // Synthetic Video Load
     document.getElementById('btn_synthetic_video').onclick = async () => {{
-      statusMsg.innerText = "Generating synthetic video & optical flow...";
-      const res = await fetch('/api/generate/synthetic_video', {{
-        method: 'POST',
-        headers: {{ 'Content-Type': 'application/json' }},
-        body: JSON.stringify({{
-          use_flow: document.getElementById('video_use_flow').checked,
-          interp_factor: 4
-        }})
-      }});
-      const data = await res.json();
-      totalFrames = data.shape[0];
-      timeSlider.max = totalFrames - 1;
-      updateFrame(0);
-      videoScreen.src = `/api/video/source?_t=${{Date.now()}}`;
-      statusMsg.innerText = `Synthetic video volume ready: ${{data.shape.join(' × ')}}`;
+      statusMsg.innerHTML = "<span style='color:#60a5fa;'>⏳ Generating synthetic video & DIS optical flow...</span>";
+      try {{
+        const res = await fetch('/api/generate/synthetic_video', {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify({{
+            use_flow: document.getElementById('video_use_flow').checked,
+            interp_factor: 2
+          }})
+        }});
+        if (!res.ok) {{
+          const err = await res.json();
+          statusMsg.innerHTML = `<span style="color:#f87171;">❌ Generation failed: ${{err.detail || 'Server error'}}</span>`;
+          return;
+        }}
+        const data = await res.json();
+        totalFrames = data.shape[0];
+        timeSlider.max = totalFrames - 1;
+        updateFrame(0);
+        videoScreen.src = `/api/video/source?_t=${{Date.now()}}`;
+        statusMsg.innerHTML = `<span style="color:#4ade80;">✔ Synthetic video volume ready: ${{data.shape.join(' × ')}} (${{data.duration_s || 0.1}}s)</span>`;
+      }} catch (err) {{
+        statusMsg.innerHTML = `<span style="color:#f87171;">❌ Error: ${{err.message}}</span>`;
+      }}
     }};
 
     // Video File Upload
     document.getElementById('video_file_input').onchange = async (e) => {{
       const file = e.target.files[0];
       if (!file) return;
-      statusMsg.innerText = `Ingesting ${{file.name}} and computing optical flow...`;
-      const formData = new FormData();
-      formData.append('file', file);
-      formData.append('use_flow', document.getElementById('video_use_flow').checked);
+      statusMsg.innerHTML = `<span style="color:#60a5fa;">⏳ Ingesting ${{file.name}} & processing optical flow...</span>`;
+      try {{
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('use_flow', document.getElementById('video_use_flow').checked);
+        formData.append('interp_factor', 2);
+        formData.append('max_frames', parseInt(document.getElementById('video_max_frames').value));
+        formData.append('max_dimension', parseInt(document.getElementById('video_max_dimension').value));
 
-      const res = await fetch('/api/upload/video', {{
-        method: 'POST',
-        body: formData
-      }});
-      const data = await res.json();
-      totalFrames = data.shape[0];
-      timeSlider.max = totalFrames - 1;
-      updateFrame(0);
-      videoScreen.src = `/api/video/source?_t=${{Date.now()}}`;
-      statusMsg.innerText = `Video ingested into volume: ${{data.shape.join(' × ')}}`;
+        const res = await fetch('/api/upload/video', {{
+          method: 'POST',
+          body: formData
+        }});
+        if (!res.ok) {{
+          const err = await res.json();
+          statusMsg.innerHTML = `<span style="color:#f87171;">❌ Ingestion failed: ${{err.detail || 'Server error'}}</span>`;
+          return;
+        }}
+        const data = await res.json();
+        totalFrames = data.shape[0];
+        timeSlider.max = totalFrames - 1;
+        updateFrame(0);
+        videoScreen.src = `/api/video/source?_t=${{Date.now()}}`;
+        statusMsg.innerHTML = `<span style="color:#4ade80;">✔ Ingested ${{data.filename}} (${{data.shape.join(' × ')}} in ${{data.duration_s}}s)</span>`;
+      }} catch (err) {{
+        statusMsg.innerHTML = `<span style="color:#f87171;">❌ Upload error: ${{err.message}}</span>`;
+      }}
     }};
 
     // 3D Mesh Export
     document.getElementById('btn_export').onclick = async () => {{
-      statusMsg.innerText = "Extracting & smoothing 3D mesh...";
+      statusMsg.innerHTML = "<span style='color:#60a5fa;'>⏳ Extracting & smoothing 3D mesh...</span>";
       const fmt = document.getElementById('format').value;
-      const boundaryVal = document.getElementById('constant_boundary').value;
-      const res = await fetch('/api/export', {{
-        method: 'POST',
-        headers: {{ 'Content-Type': 'application/json' }},
-        body: JSON.stringify({{
-          format: fmt,
-          level: parseFloat(levelSlider.value),
-          as_hollow: document.getElementById('as_hollow').checked,
-          as_negative_mold: document.getElementById('as_mold').checked,
-          constant_boundary: boundaryVal !== 'None' ? boundaryVal : null,
-          boundary_mode: document.getElementById('boundary_mode').value,
-          boundary_bezel: parseFloat(document.getElementById('boundary_bezel').value),
-          base_plate_slices: parseInt(document.getElementById('base_plate_slices').value)
-        }})
-      }});
-      const data = await res.json();
-      if (data.status === 'success') {{
-        statusMsg.innerHTML = `Exported <a href="${{data.download_url}}" download style="color:#60a5fa; font-weight:bold;">Download ${{data.filename}}</a>`;
-        if (fmt === 'glb') {{
-          viewer.src = data.download_url;
+      const bShape = document.getElementById('constant_boundary').value;
+      try {{
+        const res = await fetch('/api/export', {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify({{
+            format: fmt,
+            level: parseFloat(levelSlider.value),
+            as_hollow: document.getElementById('as_hollow').checked,
+            as_negative_mold: document.getElementById('as_mold').checked,
+            constant_boundary: bShape !== 'None' ? bShape : null,
+            boundary_mode: document.getElementById('boundary_mode').value,
+            boundary_bezel: parseFloat(document.getElementById('boundary_bezel').value),
+            base_plate_slices: parseInt(document.getElementById('base_plate_slices').value)
+          }})
+        }});
+        if (!res.ok) {{
+          const err = await res.json();
+          statusMsg.innerHTML = `<span style="color:#f87171;">❌ Export failed: ${{err.detail || 'Server error'}}</span>`;
+          return;
         }}
-        overlay.style.display = 'flex';
-        document.getElementById('stat_verts').innerText = `Verts: ${{data.stats.n_vertices.toLocaleString()}}`;
-        document.getElementById('stat_faces').innerText = `Faces: ${{data.stats.n_faces.toLocaleString()}}`;
-        const d = data.stats.dimensions_mm;
-        document.getElementById('stat_dims').innerText = `Box: ${{d[0].toFixed(1)}} × ${{d[1].toFixed(1)}} × ${{d[2].toFixed(1)}} mm`;
-        document.getElementById('stat_sla').innerText = data.stats.fits_standard_sla_vat ? "SLA Vat: ✅" : "SLA Vat: ⚠ Exceeds";
-      }} else {{
-        statusMsg.innerText = "Export failed.";
+        const data = await res.json();
+        if (data.status === 'success') {{
+          statusMsg.innerHTML = `Exported <a href="${{data.download_url}}" download style="color:#60a5fa; font-weight:bold;">Download ${{data.filename}}</a>`;
+          if (fmt === 'glb') {{
+            viewer.src = data.download_url;
+          }}
+          overlay.style.display = 'flex';
+          document.getElementById('stat_verts').innerText = `Verts: ${{data.stats.n_vertices.toLocaleString()}}`;
+          document.getElementById('stat_faces').innerText = `Faces: ${{data.stats.n_faces.toLocaleString()}}`;
+          const d = data.stats.dimensions_mm;
+          document.getElementById('stat_dims').innerText = `Box: ${{d[0].toFixed(1)}} × ${{d[1].toFixed(1)}} × ${{d[2].toFixed(1)}} mm`;
+          document.getElementById('stat_sla').innerText = data.stats.fits_standard_sla_vat ? "SLA Vat: ✅" : "SLA Vat: ⚠ Exceeds";
+        }} else {{
+          statusMsg.innerText = "Export failed.";
+        }}
+      }} catch (err) {{
+        statusMsg.innerHTML = `<span style="color:#f87171;">❌ Export error: ${{err.message}}</span>`;
       }}
     }};
   </script>

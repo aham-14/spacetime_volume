@@ -92,5 +92,32 @@ class TestAPI(unittest.TestCase):
         self.assertGreater(data["stats"]["volume_mm3"], 0)
 
 
+    def test_upload_video_endpoint(self):
+        import tempfile
+        from pathlib import Path
+        from engine.dummy_data import write_dummy_mp4
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            test_clip = Path(tmp_dir) / "clip.mp4"
+            write_dummy_mp4(test_clip, n=12)
+
+            with open(test_clip, "rb") as f:
+                res = self.client.post(
+                    "/api/upload/video",
+                    files={"file": ("clip.mp4", f, "video/mp4")},
+                    data={
+                        "use_flow": "true",
+                        "interp_factor": "2",
+                        "max_frames": "16",
+                        "max_dimension": "128",
+                    },
+                )
+            self.assertEqual(res.status_code, 200)
+            data = res.json()
+            self.assertEqual(data["status"], "success")
+            self.assertIn("shape", data)
+            self.assertIn("duration_s", data)
+
+
 if __name__ == "__main__":
     unittest.main()
