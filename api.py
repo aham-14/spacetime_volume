@@ -133,6 +133,13 @@ class ExportRequest(BaseModel):
     step_size: int = Field(1, ge=1, le=4)
     voxel_size_mm: float = Field(0.5, ge=0.05, le=5.0)
     smooth_iterations: int = Field(4, ge=0, le=20)
+    constant_boundary: Optional[str] = Field(None, description="Constant frame shape: None, rounded_rect, circle, box")
+    boundary_mode: str = Field("framed", description="framed, monolith, or solid_relief")
+    boundary_bezel: float = Field(4.0, ge=1.0, le=20.0)
+    boundary_corner_radius: float = Field(8.0, ge=0.0, le=50.0)
+    base_plate_slices: int = Field(0, ge=0, le=20)
+    uninvert_y: bool = Field(True, description="Un-invert vertical Y axis so top of video is at top of 3D volume")
+    invert_z: bool = Field(False, description="Invert time Z-axis direction")
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +322,13 @@ def export_mesh(req: ExportRequest):
             mold_open_top=req.mold_open_top,
             as_hollow=req.as_hollow,
             hollow_wall_thickness=req.hollow_wall_thickness,
+            constant_boundary=req.constant_boundary,
+            boundary_mode=req.boundary_mode,
+            boundary_bezel=req.boundary_bezel,
+            boundary_corner_radius=req.boundary_corner_radius,
+            base_plate_slices=req.base_plate_slices,
+            uninvert_y=req.uninvert_y,
+            invert_z=req.invert_z,
         )
         stats = exporter.export(vol, out_path, level=req.level)
 
@@ -563,6 +577,14 @@ def index_page():
           <input type="checkbox" id="as_mold">
           <label for="as_mold">📦 Negative Pouring Mold</label>
         </div>
+        <div class="checkbox-field">
+          <input type="checkbox" id="uninvert_y" checked>
+          <label for="uninvert_y">↕ Un-invert Vertical (Top of Video at Top)</label>
+        </div>
+        <div class="checkbox-field">
+          <input type="checkbox" id="invert_z">
+          <label for="invert_z">⇄ Invert Time (Reverse Z-axis direction)</label>
+        </div>
         <button class="btn-primary" id="btn_export">🖨 Export 3D Mesh</button>
       </div>
 
@@ -575,8 +597,30 @@ def index_page():
 
     <!-- Central Workspace: 3D Viewport + Right Dock Video Monitor -->
     <div class="workspace">
-      <div class="viewport-3d">
-        <model-viewer id="viewer3d" src="/api/download/spacetime_model.glb" camera-controls auto-rotate shadow-intensity="1" ar></model-viewer>
+      <div class="viewport-3d" style="position:relative;">
+        <!-- Floating Orientation & Full Grab Toolbar -->
+        <div style="position:absolute; top:12px; left:12px; z-index:10; display:flex; gap:6px; flex-wrap:wrap; background:rgba(15,23,42,0.85); padding:6px 10px; border-radius:8px; border:1px solid #334155; backdrop-filter:blur(8px);">
+          <button id="btn_cam_reset" style="padding:4px 8px; font-size:0.75rem; background:#1e293b; color:#cbd5e1; border:1px solid #475569; border-radius:4px; cursor:pointer;" title="Reset Camera Orbit">🔄 Reset</button>
+          <button id="btn_cam_top" style="padding:4px 8px; font-size:0.75rem; background:#1e293b; color:#cbd5e1; border:1px solid #475569; border-radius:4px; cursor:pointer;" title="Top View (XY Slice Plane)">📐 Top</button>
+          <button id="btn_cam_front" style="padding:4px 8px; font-size:0.75rem; background:#1e293b; color:#cbd5e1; border:1px solid #475569; border-radius:4px; cursor:pointer;" title="Front View (Z-axis Extrusion)">👤 Front</button>
+          <button id="btn_cam_side" style="padding:4px 8px; font-size:0.75rem; background:#1e293b; color:#cbd5e1; border:1px solid #475569; border-radius:4px; cursor:pointer;" title="Side Profile">↔ Side</button>
+          <button id="btn_cam_rot" style="padding:4px 8px; font-size:0.75rem; background:#1e293b; color:#cbd5e1; border:1px solid #475569; border-radius:4px; cursor:pointer;" title="Rotate 90°">↻ 90°</button>
+          <button id="btn_flip_v" style="padding:4px 8px; font-size:0.75rem; background:#3b82f6; color:#ffffff; border:1px solid #60a5fa; border-radius:4px; cursor:pointer; font-weight:bold;" title="Flip / Un-invert Vertical Orientation">↕ Un-invert / Flip</button>
+        </div>
+
+        <model-viewer
+          id="viewer3d"
+          src="/api/download/spacetime_model.glb"
+          camera-controls
+          touch-action="none"
+          interaction-prompt="none"
+          min-camera-orbit="auto -180deg auto"
+          max-camera-orbit="auto 180deg auto"
+          min-field-of-view="5deg"
+          max-field-of-view="140deg"
+          shadow-intensity="1"
+          ar>
+        </model-viewer>
         <div class="overlay" id="stats_overlay">
           <span id="stat_verts">Verts: 14,818</span>
           <span id="stat_faces">Faces: 29,632</span>
@@ -847,7 +891,9 @@ def index_page():
             constant_boundary: bShape !== 'None' ? bShape : null,
             boundary_mode: document.getElementById('boundary_mode').value,
             boundary_bezel: parseFloat(document.getElementById('boundary_bezel').value),
-            base_plate_slices: parseInt(document.getElementById('base_plate_slices').value)
+            base_plate_slices: parseInt(document.getElementById('base_plate_slices').value),
+            uninvert_y: document.getElementById('uninvert_y').checked,
+            invert_z: document.getElementById('invert_z').checked
           }})
         }});
         if (!res.ok) {{
@@ -873,6 +919,38 @@ def index_page():
       }} catch (err) {{
         statusMsg.innerHTML = `<span style="color:#f87171;">❌ Export error: ${{err.message}}</span>`;
       }}
+    }};
+
+    // Full Freedom Camera & Orientation Controls
+    document.getElementById('btn_cam_reset').onclick = () => {{
+      viewer.cameraOrbit = "45deg 55deg auto";
+      viewer.cameraTarget = "auto auto auto";
+      viewer.fieldOfView = "auto";
+    }};
+
+    document.getElementById('btn_cam_top').onclick = () => {{
+      viewer.cameraOrbit = "0deg 0deg auto";
+    }};
+
+    document.getElementById('btn_cam_front').onclick = () => {{
+      viewer.cameraOrbit = "0deg 90deg auto";
+    }};
+
+    document.getElementById('btn_cam_side').onclick = () => {{
+      viewer.cameraOrbit = "90deg 90deg auto";
+    }};
+
+    let currentYawOffset = 45;
+    document.getElementById('btn_cam_rot').onclick = () => {{
+      currentYawOffset = (currentYawOffset + 90) % 360;
+      viewer.cameraOrbit = `${{currentYawOffset}}deg 65deg auto`;
+    }};
+
+    document.getElementById('btn_flip_v').onclick = () => {{
+      const chk = document.getElementById('uninvert_y');
+      chk.checked = !chk.checked;
+      statusMsg.innerHTML = `<span style="color:#60a5fa;'>⏳ Flipping volume vertical orientation (un-invert=${{chk.checked}})...</span>`;
+      document.getElementById('btn_export').click();
     }};
   </script>
 </body>

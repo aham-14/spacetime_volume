@@ -513,6 +513,8 @@ class MeshExporter:
         boundary_corner_radius: float = 8.0,
         boundary_padding: float = 2.0,
         base_plate_slices: int = 0,
+        uninvert_y: bool = True,
+        invert_z: bool = False,
     ) -> None:
         self.level = level
         self.step_size = step_size
@@ -534,6 +536,8 @@ class MeshExporter:
         self.boundary_corner_radius = boundary_corner_radius
         self.boundary_padding = boundary_padding
         self.base_plate_slices = base_plate_slices
+        self.uninvert_y = uninvert_y
+        self.invert_z = invert_z
 
     def export(
         self,
@@ -553,6 +557,8 @@ class MeshExporter:
         boundary_corner_radius: Optional[float] = None,
         boundary_padding: Optional[float] = None,
         base_plate_slices: Optional[int] = None,
+        uninvert_y: Optional[bool] = None,
+        invert_z: Optional[bool] = None,
         repair_mesh: bool = True,
         progress_callback: Optional[Callable[[float], None]] = None,
     ) -> MeshStats:
@@ -660,8 +666,24 @@ class MeshExporter:
                 f"Volume range: [{data_to_mesh.min():.2f}, {data_to_mesh.max():.2f}]."
             )
 
+        eff_uninvert_y = self.uninvert_y if uninvert_y is None else uninvert_y
+        eff_invert_z = self.invert_z if invert_z is None else invert_z
+
         # Reorder (z, y, x) = (t, row, col) -> (col, row, time) = (x, y, z)
         verts = verts[:, [2, 1, 0]]
+
+        # Un-invert vertical image axis Y so top of video frame is top of 3D volume (+Y)
+        if eff_uninvert_y:
+            max_y = float(data_to_mesh.shape[1] - 1)
+            verts[:, 1] = max_y - verts[:, 1]
+            faces = faces[:, [0, 2, 1]]  # preserve right-handed outward normals
+
+        # Optional time axis inversion
+        if eff_invert_z:
+            max_z = float(data_to_mesh.shape[0] - 1)
+            verts[:, 2] = max_z - verts[:, 2]
+            faces = faces[:, [0, 2, 1]]
+
         if effective_pad > 0:
             verts -= effective_pad
         verts *= self.voxel_size  # mm units
