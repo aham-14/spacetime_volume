@@ -148,6 +148,10 @@ def build_viewer(
         vox_sz = params.get("voxel_size", voxel_size_mm)
         chk_sz = params.get("chunk_size", chunk_size)
         iso_level = float(params.get("level", 0.5))
+        is_hollow = bool(params.get("as_hollow", False))
+        hollow_th = float(params.get("hollow_wall_thickness", 3.0))
+        drain = bool(params.get("auto_drain_holes", True))
+        two_piece = bool(params.get("two_piece_mold", False))
         prog_cb = params.get("progress_callback", None)
 
         exporter = MeshExporter(
@@ -159,8 +163,31 @@ def build_viewer(
             as_negative_mold=is_mold,
             mold_wall_thickness=wall_th,
             mold_open_top=open_top,
+            as_hollow=is_hollow,
+            hollow_wall_thickness=hollow_th,
+            auto_drain_holes=drain,
         )
-        return exporter.export(vol, path, level=iso_level, progress_callback=prog_cb)
+
+        if two_piece and is_mold:
+            out_p = Path(path)
+            stats_a, stats_b = exporter.export_two_piece_mold(
+                vol,
+                output_dir=out_p.parent,
+                file_prefix=out_p.stem,
+                format_ext=out_p.suffix or ".stl",
+                wall_thickness=wall_th,
+                open_top=open_top,
+            )
+            return stats_a
+
+        return exporter.export(
+            vol, path,
+            level=iso_level,
+            as_hollow=is_hollow,
+            hollow_wall_thickness=hollow_th,
+            auto_drain_holes=drain,
+            progress_callback=prog_cb,
+        )
 
     # ------------------------------------------------------------------
     # Assemble Viewer & Bind Reactive Controls

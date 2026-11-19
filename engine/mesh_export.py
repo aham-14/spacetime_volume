@@ -45,6 +45,9 @@ class MeshStats:
     is_negative_mold: bool
     output_path: str
     export_format: str = "stl"
+    dimensions_mm: Tuple[float, float, float] = (0.0, 0.0, 0.0)  # (width_x, depth_y, height_z)
+    fits_standard_sla_vat: bool = True  # fits within standard 143 x 89 x 175 mm SLA build volume
+    repair_applied: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -363,6 +366,116 @@ def generate_negative_mold(
     return SpaceTimeVolume(np.asarray(mold_mm), new_meta)
 
 
+def generate_two_piece_mold(
+    vol: SpaceTimeVolume,
+    wall_thickness: int = 4,
+    open_top: bool = True,
+    split_axis: int = 1,  # 1 = Y (rows), 2 = X (cols)
+    key_radius: int = 3,
+    key_depth: int = 2,
+) -> Tuple[SpaceTimeVolume, SpaceTimeVolume]:
+    """Split a negative mold volume into two interlocking halves with alignment keys.
+
+    Creates a 2-part casting mold suitable for pouring wax, silicone, or resin
+    where complex undercuts would prevent single-block demolding:
+      - Part A (male): Receives raised hemispherical registration keys (pegs).
+      - Part B (female): Receives matching negative registration sockets.
+      - Top pour hole / spout remains intact.
+
+    Parameters
+    ----------
+    vol : SpaceTimeVolume
+        Positive space-time volume or pre-generated mold.
+    wall_thickness : int
+        Thickness of bounding mold walls in voxels.
+    open_top : bool
+        Whether to leave the top pour hole open.
+    split_axis : int
+        Axis to split along: 1 for Y (default), 2 for X.
+    key_radius : int
+        Radius of registration pegs/sockets in voxels.
+    key_depth : int
+        Projection depth of registration keys along the split axis.
+
+    Returns
+    -------
+    (part_a, part_b) : Tuple[SpaceTimeVolume, SpaceTimeVolume]
+    """
+    if vol.meta.get("is_negative_mold", False):
+        mold_vol = vol
+    else:
+        mold_vol = generate_negative_mold(
+            vol, wall_thickness=wall_thickness, open_top=open_top
+        )
+
+    mold_data = mold_vol.data
+    T, H, W = mold_data.shape
+
+    part_a_data = mold_data.copy()
+    part_b_data = mold_data.copy()
+
+    if split_axis == 1:
+        # Split along Y (rows)
+        split_idx = H // 2
+        part_a_data[:, split_idx:, :] = 0.0
+        part_b_data[:, :split_idx, :] = 0.0
+
+        # Place registration keys near flange corners
+        z_keys = [max(1, wall_thickness // 2), T - max(2, wall_thickness // 2) - 1]
+        x_keys = [max(1, wall_thickness // 2), W - max(2, wall_thickness // 2) - 1]
+
+        for zk in z_keys:
+            for xk in x_keys:
+                for dz in range(-key_radius, key_radius + 1):
+                    for dx in range(-key_radius, key_radius + 1):
+                        if dz * dz + dx * dx <= key_radius * key_radius:
+                            z_pos = np.clip(zk + dz, 0, T - 1)
+                            x_pos = np.clip(xk + dx, 0, W - 1)
+                            for dy in range(0, key_depth):
+                                y_pos = np.clip(split_idx + dy, 0, H - 1)
+                                part_a_data[z_pos, y_pos, x_pos] = 1.0
+                                part_b_data[z_pos, y_pos, x_pos] = 0.0
+    else:
+        # Split along X (cols)
+        split_idx = W // 2
+        part_a_data[:, :, split_idx:] = 0.0
+        part_b_data[:, :, :split_idx] = 0.0
+
+        z_keys = [max(1, wall_thickness // 2), T - max(2, wall_thickness // 2) - 1]
+        y_keys = [max(1, wall_thickness // 2), H - max(2, wall_thickness // 2) - 1]
+
+        for zk in z_keys:
+            for yk in y_keys:
+                for dz in range(-key_radius, key_radius + 1):
+                    for dy in range(-key_radius, key_radius + 1):
+                        if dz * dz + dy * dy <= key_radius * key_radius:
+                            z_pos = np.clip(zk + dz, 0, T - 1)
+                            y_pos = np.clip(yk + dy, 0, H - 1)
+                            for dx in range(0, key_depth):
+                                x_pos = np.clip(split_idx + dx, 0, W - 1)
+                                part_a_data[z_pos, y_pos, x_pos] = 1.0
+                                part_b_data[z_pos, y_pos, x_pos] = 0.0
+
+    meta_a = {
+        **mold_vol.meta,
+        "is_two_piece_mold": True,
+        "mold_part": "A",
+        "split_axis": split_axis,
+        "split_index": split_idx,
+        "has_registration_keys": True,
+    }
+    meta_b = {
+        **mold_vol.meta,
+        "is_two_piece_mold": True,
+        "mold_part": "B",
+        "split_axis": split_axis,
+        "split_index": split_idx,
+        "has_registration_keys": True,
+    }
+
+    return SpaceTimeVolume(part_a_data, meta_a), SpaceTimeVolume(part_b_data, meta_b)
+
+
 # ---------------------------------------------------------------------------
 # High-Resolution Mesh Exporter Class
 # ---------------------------------------------------------------------------
@@ -391,6 +504,9 @@ class MeshExporter:
         as_negative_mold: bool = False,
         mold_wall_thickness: int = 4,
         mold_open_top: bool = True,
+        as_hollow: bool = False,
+        hollow_wall_thickness: float = 3.0,
+        auto_drain_holes: bool = True,
     ) -> None:
         self.level = level
         self.step_size = step_size
@@ -403,6 +519,9 @@ class MeshExporter:
         self.as_negative_mold = as_negative_mold
         self.mold_wall_thickness = mold_wall_thickness
         self.mold_open_top = mold_open_top
+        self.as_hollow = as_hollow
+        self.hollow_wall_thickness = hollow_wall_thickness
+        self.auto_drain_holes = auto_drain_holes
 
     def export(
         self,
@@ -413,6 +532,10 @@ class MeshExporter:
         as_negative_mold: Optional[bool] = None,
         mold_wall_thickness: Optional[int] = None,
         mold_open_top: Optional[bool] = None,
+        as_hollow: Optional[bool] = None,
+        hollow_wall_thickness: Optional[float] = None,
+        auto_drain_holes: Optional[bool] = None,
+        repair_mesh: bool = True,
         progress_callback: Optional[Callable[[float], None]] = None,
     ) -> MeshStats:
         """Extract mesh, apply Taubin smoothing, scale, and write 3D file (.stl, .obj, .ply, .glb).
@@ -426,6 +549,10 @@ class MeshExporter:
         as_negative_mold : bool | None (overrides instance setting if given)
         mold_wall_thickness : int | None
         mold_open_top : bool | None
+        as_hollow : bool | None (hollows the object for SLA resin saving)
+        hollow_wall_thickness : float | None
+        auto_drain_holes : bool | None (punches bottom drain holes into hollow void)
+        repair_mesh : bool (runs automated normal/winding repairs for slicers)
         progress_callback : callable(percent) | None
 
         Returns
@@ -446,9 +573,12 @@ class MeshExporter:
         is_mold = self.as_negative_mold if as_negative_mold is None else as_negative_mold
         wall_th = self.mold_wall_thickness if mold_wall_thickness is None else mold_wall_thickness
         open_tp = self.mold_open_top if mold_open_top is None else mold_open_top
+        is_hollow = self.as_hollow if as_hollow is None else as_hollow
+        hollow_th = self.hollow_wall_thickness if hollow_wall_thickness is None else hollow_wall_thickness
+        drain = self.auto_drain_holes if auto_drain_holes is None else auto_drain_holes
 
         # --------------------------------------------------------------
-        # 1. Prepare target volume (Positive Object or Negative Mold)
+        # 1. Prepare target volume (Positive, Hollow Shell, or Mold)
         # --------------------------------------------------------------
         if is_mold:
             # Generate negative mold (streamed / chunked friendly)
@@ -459,6 +589,15 @@ class MeshExporter:
             )
             data_to_mesh = target_vol.data
             effective_pad = 0  # Mold generator already includes sealing boundary padding
+        elif is_hollow:
+            # Hollow the volume for SLA resin savings
+            target_vol = vol.hollow(wall_thickness_vox=hollow_th, auto_drain=drain)
+            data = target_vol.data
+            effective_pad = pad
+            if effective_pad > 0:
+                data_to_mesh = np.pad(data, pad_width=effective_pad, mode="constant", constant_values=0.0)
+            else:
+                data_to_mesh = data
         else:
             data = vol.data
             effective_pad = pad
@@ -492,13 +631,24 @@ class MeshExporter:
         verts *= self.voxel_size  # mm units
 
         # --------------------------------------------------------------
-        # 3. Build Trimesh Object & Weld Boundary Vertices
+        # 3. Build Trimesh Object & Automated Slicer Health Healing
         # --------------------------------------------------------------
         mesh = trimesh.Trimesh(
             vertices=verts,
             faces=faces,
             process=True,  # welds duplicate chunk boundary vertices and fixes winding
         )
+
+        repair_applied = False
+        if repair_mesh:
+            try:
+                import trimesh.repair as trepair
+                trepair.fix_normals(mesh)
+                trepair.fill_holes(mesh)
+                trepair.fix_inversion(mesh)
+                repair_applied = True
+            except Exception:
+                pass
 
         # --------------------------------------------------------------
         # 4. High-Res SLA Taubin Smoothing
@@ -512,11 +662,23 @@ class MeshExporter:
             )
 
         # --------------------------------------------------------------
-        # 5. Export STL
+        # 5. Export Mesh
         # --------------------------------------------------------------
         mesh.export(str(output_path))
 
         bounds = mesh.bounds
+        extents_mm = (
+            float(bounds[1, 0] - bounds[0, 0]),
+            float(bounds[1, 1] - bounds[0, 1]),
+            float(bounds[1, 2] - bounds[0, 2]),
+        )
+        # Standard SLA build vat bounds: 143 mm x 89 mm x 175 mm (e.g. Mars / Photon)
+        fits_sla = (
+            extents_mm[0] <= 143.0 and
+            extents_mm[1] <= 89.0 and
+            extents_mm[2] <= 175.0
+        )
+
         stats = MeshStats(
             n_vertices=len(mesh.vertices),
             n_faces=len(mesh.faces),
@@ -528,6 +690,9 @@ class MeshExporter:
             is_negative_mold=is_mold,
             output_path=str(output_path.resolve()),
             export_format=export_fmt,
+            dimensions_mm=extents_mm,
+            fits_standard_sla_vat=fits_sla,
+            repair_applied=repair_applied,
         )
 
         # Reclaim mesh RAM immediately
@@ -535,6 +700,32 @@ class MeshExporter:
         gc.collect()
 
         return stats
+
+    def export_two_piece_mold(
+        self,
+        vol: SpaceTimeVolume,
+        output_dir: Union[str, Path] = "output",
+        file_prefix: str = "mold",
+        format_ext: str = ".stl",
+        wall_thickness: int = 4,
+        open_top: bool = True,
+        split_axis: int = 1,
+    ) -> Tuple[MeshStats, MeshStats]:
+        """Convenience method to export both halves of an interlocking 2-piece mold."""
+        part_a, part_b = generate_two_piece_mold(
+            vol,
+            wall_thickness=wall_thickness,
+            open_top=open_top,
+            split_axis=split_axis,
+        )
+        out_dir = Path(output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path_a = out_dir / f"{file_prefix}_part_a{format_ext}"
+        path_b = out_dir / f"{file_prefix}_part_b{format_ext}"
+
+        stats_a = self.export(part_a, path_a, pad=0, as_negative_mold=False)
+        stats_b = self.export(part_b, path_b, pad=0, as_negative_mold=False)
+        return stats_a, stats_b
 
     def export_negative_mold(
         self,

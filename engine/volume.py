@@ -213,6 +213,88 @@ class SpaceTimeVolume:
         }
         return SpaceTimeVolume(mask.astype(np.float32), new_meta)
 
+    def hollow(
+        self,
+        wall_thickness_vox: float = 3.0,
+        auto_drain: bool = True,
+        drain_hole_radius: float = 3.0,
+        drain_hole_positions: Optional[List[Tuple[int, int]]] = None,
+    ) -> SpaceTimeVolume:
+        """Hollow the volume to a uniform shell of `wall_thickness_vox` voxels.
+
+        Uses 3D Euclidean Distance Transform (EDT) on the object interior.
+        Voxels located deeper than `wall_thickness_vox` from the outer surface
+        are cleared to 0.0 (empty interior cavity).
+
+        If `auto_drain=True`, carves circular vent/drain holes from the bottom
+        (z=0) into the cavity so uncured liquid resin can drain during SLA printing.
+
+        Parameters
+        ----------
+        wall_thickness_vox : float
+            Thickness of the solid shell in voxels (e.g. 2.0 to 4.0 voxels).
+        auto_drain : bool
+            Whether to punch drainage holes through the base.
+        drain_hole_radius : float
+            Radius of the drainage holes in voxels.
+        drain_hole_positions : list of (cy, cx) | None
+            Specific (row, col) coordinates for drainage holes on base slices.
+            If None and auto_drain=True, automatically computes centroid of base.
+        """
+        try:
+            from scipy.ndimage import distance_transform_edt
+        except ImportError as exc:
+            raise ImportError("scipy is required for volume hollowing") from exc
+
+        T, H, W = self.shape
+        inside = self.data >= 0.5
+        if not np.any(inside):
+            return self
+
+        dist = distance_transform_edt(inside)
+
+        # Clear interior cavity
+        hollow_arr = self.data.copy()
+        cavity_mask = dist > float(wall_thickness_vox)
+        hollow_arr[cavity_mask] = 0.0
+
+        # Punch drain holes
+        if auto_drain:
+            # Find base Z level where object starts
+            active_z = np.where(inside.any(axis=(1, 2)))[0]
+            if len(active_z) > 0:
+                base_z = int(active_z[0])
+                # Punch hole from base_z up through the bottom wall
+                max_drain_z = min(T, base_z + int(np.ceil(wall_thickness_vox * 2)) + 2)
+
+                if drain_hole_positions is None:
+                    # Auto-compute centroid of base slice
+                    base_slice = inside[base_z]
+                    ys, xs = np.mgrid[0:H, 0:W]
+                    denom = float(base_slice.sum())
+                    if denom > 0:
+                        cy = int((ys * base_slice).sum() / denom)
+                        cx = int((xs * base_slice).sum() / denom)
+                        holes = [(cy, cx)]
+                    else:
+                        holes = [(H // 2, W // 2)]
+                else:
+                    holes = [(int(y), int(x)) for y, x in drain_hole_positions]
+
+                y_grid, x_grid = np.ogrid[:H, :W]
+                for cy, cx in holes:
+                    hole_mask = (y_grid - cy) ** 2 + (x_grid - cx) ** 2 <= (drain_hole_radius ** 2)
+                    for z in range(base_z, max_drain_z):
+                        hollow_arr[z, hole_mask] = 0.0
+
+        new_meta = {
+            **self.meta,
+            "is_hollow": True,
+            "wall_thickness_vox": wall_thickness_vox,
+            "has_drain_holes": auto_drain,
+        }
+        return SpaceTimeVolume(hollow_arr, new_meta)
+
     def save(self, path: Union[str, Path]) -> Path:
         """Save the volume and its metadata to a compressed `.npz` archive."""
         out_path = Path(path)

@@ -18,6 +18,7 @@ from .mesh_export import (
     MeshStats,
     chunked_marching_cubes,
     generate_negative_mold,
+    generate_two_piece_mold,
     SparseOccupancyIndex,
 )
 from .pipeline import Pipeline, StepTelemetry
@@ -38,7 +39,7 @@ __all__ = [
     "sdf_smooth_union", "sdf_to_intensity", "make_grids",
     # Mesh export & Mold generation
     "MeshExporter", "MeshStats", "chunked_marching_cubes",
-    "generate_negative_mold", "SparseOccupancyIndex",
+    "generate_negative_mold", "generate_two_piece_mold", "SparseOccupancyIndex",
     # Composable pipeline
     "Pipeline", "StepTelemetry",
     # Dummy data

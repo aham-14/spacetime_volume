@@ -5,3 +5,6 @@ plotly>=5.18
 ipywidgets>=8
 anywidget        # required by plotly>=6 for go.FigureWidget
 jupyterlab
+fastapi>=0.100
+uvicorn>=0.20
+python-multipart

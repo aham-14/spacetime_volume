@@ -150,6 +150,31 @@ class SpaceTimeViewer:
             disabled=True,
             layout=w.Layout(width="220px"),
         )
+        self.two_piece_toggle = w.Checkbox(
+            value=False,
+            description="🧩 2-Piece Mold (Interlocking Keys)",
+            tooltip="Split mold into two halves with alignment pegs and sockets",
+            indent=False,
+            disabled=True,
+            layout=w.Layout(width="260px"),
+        )
+
+        # --- SLA Hollowing Controls ---
+        self.hollow_toggle = w.Checkbox(
+            value=False,
+            description="🏺 Hollow Shell (Resin Saving + Drain Hole)",
+            tooltip="Hollows object to a uniform shell with bottom drain hole to reduce resin volume & peel suction",
+            indent=False,
+            layout=w.Layout(width="340px"),
+        )
+        self.hollow_wall_slider = w.FloatSlider(
+            value=3.0, min=1.0, max=8.0, step=0.5,
+            description="Shell (vox):",
+            tooltip="Hollow wall thickness in voxels",
+            disabled=True,
+            readout_format=".1f",
+            layout=w.Layout(width="220px"),
+        )
 
         self.stl_path_text = w.Text(
             value=str(Path(self._stl_output_dir) / "spacetime_model.stl"),
@@ -273,8 +298,12 @@ class SpaceTimeViewer:
 
         # Hardware STL / Negative Mold Box
         r_mold_cfg = w.HBox(
-            [self.as_mold_toggle, self.mold_open_top, self.mold_wall_slider],
-            layout=w.Layout(align_items="center", gap="12px"),
+            [self.as_mold_toggle, self.mold_open_top, self.mold_wall_slider, self.two_piece_toggle],
+            layout=w.Layout(align_items="center", gap="12px", flex_wrap="wrap"),
+        )
+        r_hollow_cfg = w.HBox(
+            [self.hollow_toggle, self.hollow_wall_slider],
+            layout=w.Layout(align_items="center", gap="12px", margin="2px 0"),
         )
         r_stl_params = w.HBox(
             [self.stl_path_text, self.format_dropdown, self.level_slider,
@@ -287,7 +316,7 @@ class SpaceTimeViewer:
             layout=w.Layout(align_items="center", gap="12px"),
         )
         stl_panel = w.VBox(
-            [r_mold_cfg, r_stl_params, r_stl_btn],
+            [r_mold_cfg, r_hollow_cfg, r_stl_params, r_stl_btn],
             layout=w.Layout(
                 border="1px solid #3a75c4", border_radius="6px",
                 padding="10px 14px", margin="8px 0", background_color="#181e29"
@@ -313,6 +342,7 @@ class SpaceTimeViewer:
         # (once with the stale cell value, once with the updated value).
         self.edge_width_slider.observe(self._on_edge_width_change, names="value")
         self.as_mold_toggle.observe(self._on_mold_toggle, names="value")
+        self.hollow_toggle.observe(self._on_hollow_toggle, names="value")
         self.format_dropdown.observe(self._on_format_change, names="value")
         self.regen_btn.on_click(self._on_regen_click)
         self.stl_btn.on_click(self._on_stl_click)
@@ -432,10 +462,14 @@ class SpaceTimeViewer:
         is_mold = bool(change["new"])
         self.mold_open_top.disabled = not is_mold
         self.mold_wall_slider.disabled = not is_mold
+        self.two_piece_toggle.disabled = not is_mold
         # Update suggested filename with current extension
         ext = self.format_dropdown.value
         base_name = f"spacetime_mold{ext}" if is_mold else f"spacetime_model{ext}"
         self.stl_path_text.value = str(Path(self._stl_output_dir) / base_name)
+
+    def _on_hollow_toggle(self, change: dict) -> None:
+        self.hollow_wall_slider.disabled = not bool(change["new"])
 
     def _on_format_change(self, change: dict) -> None:
         new_ext = str(change["new"])
@@ -459,6 +493,9 @@ class SpaceTimeViewer:
             "as_negative_mold": bool(self.as_mold_toggle.value),
             "mold_open_top": bool(self.mold_open_top.value),
             "mold_wall_thickness": int(self.mold_wall_slider.value),
+            "two_piece_mold": bool(self.two_piece_toggle.value),
+            "as_hollow": bool(self.hollow_toggle.value),
+            "hollow_wall_thickness": float(self.hollow_wall_slider.value),
             "step_size": int(self.step_size_slider.value),
             "smooth_iterations": int(self.smooth_iters_slider.value),
             "voxel_size": float(self.voxel_size_slider.value),
@@ -468,7 +505,13 @@ class SpaceTimeViewer:
         self.stl_btn.disabled = True
         self.stl_progress.layout.visibility = "visible"
         self.stl_progress.value = 10
-        target_desc = "Negative Mold (Boolean Subtraction)" if export_params["as_negative_mold"] else "SLA Mesh"
+        if export_params["as_negative_mold"]:
+            target_desc = "2-Piece Mold (Interlocking Keys)" if export_params["two_piece_mold"] else "Negative Mold"
+        elif export_params["as_hollow"]:
+            target_desc = "Hollow SLA Shell"
+        else:
+            target_desc = "SLA Mesh"
+
         self.stl_status_html.value = f"<span style='color:#fa0'>⏳  Processing {target_desc} (Chunked SLA Extraction)…</span>"
 
         vol_snapshot = self.volume
@@ -484,10 +527,17 @@ class SpaceTimeViewer:
 
                 wt = "✅ watertight" if stats.is_watertight else "⚠ not watertight"
                 mold_lbl = " [Negative Mold]" if stats.is_negative_mold else " [Positive Model]"
+                if export_params["as_hollow"]:
+                    mold_lbl += " [Hollow Shell]"
                 fmt_name = getattr(stats, "export_format", "STL").upper()
+                dims = getattr(stats, "dimensions_mm", (0.0, 0.0, 0.0))
+                sla_fit = "✅ Fits Vat" if getattr(stats, "fits_standard_sla_vat", True) else "⚠ Exceeds Standard Vat"
+                rep_tag = " | 🩹 Slicer repaired" if getattr(stats, "repair_applied", False) else ""
+
                 self.stl_status_html.value = (
                     f"<b style='color:#4f4'>✔ {fmt_name} exported{mold_lbl}</b> → "
                     f"<code>{stats.output_path}</code><br>"
+                    f"<b>Box (mm):</b> {dims[0]:.1f} × {dims[1]:.1f} × {dims[2]:.1f} ({sla_fit}{rep_tag})<br>"
                     f"Verts: {stats.n_vertices:,} &nbsp;|&nbsp; "
                     f"Faces: {stats.n_faces:,} &nbsp;|&nbsp; "
                     f"Vol: {stats.volume_mm3:.1f} mm³ &nbsp;|&nbsp; {wt}"
