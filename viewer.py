@@ -21,14 +21,14 @@ import ipywidgets as w
 import numpy as np
 import plotly.graph_objects as go
 
-from engine import SpaceTimeVolume
+from engine import SpaceTimeVolume, MeshStats
 
 # ------------------------------------------------------------------
 # Factory type aliases
 # ------------------------------------------------------------------
 VolumeFactory     = Callable[[], SpaceTimeVolume]
-ProceduralFactory = Callable[[str, float], SpaceTimeVolume]   # (easing, edge_width) -> vol
-MeshExportFactory = Callable[[SpaceTimeVolume, dict], object] # (vol, params) -> MeshStats
+ProceduralFactory = Callable[[str, float], SpaceTimeVolume]    # (easing, edge_width) -> vol
+MeshExportFactory = Callable[[SpaceTimeVolume, dict], MeshStats]  # (vol, params) -> MeshStats
 
 
 class SpaceTimeViewer:
@@ -291,8 +291,11 @@ class SpaceTimeViewer:
         self.mode_toggle.observe(self._on_mode_change, names="value")
         self.easing_dropdown.observe(self._on_easing_change, names="value")
         self.time_slider.observe(self._on_slider_change, names="value")
-        self.sigma_slider.observe(self._on_sigma_change, names="value")
-        self.flow_toggle.observe(self._on_flow_toggle, names="value")
+        # NOTE: sigma_slider and flow_toggle are intentionally NOT wired here.
+        # app.py's build_viewer() attaches the authoritative observers for those
+        # two widgets so it can update _sigma_cell / _use_flow_cell first, then
+        # call _activate().  Wiring them here too would cause a double build
+        # (once with the stale cell value, once with the updated value).
         self.edge_width_slider.observe(self._on_edge_width_change, names="value")
         self.as_mold_toggle.observe(self._on_mold_toggle, names="value")
         self.regen_btn.on_click(self._on_regen_click)

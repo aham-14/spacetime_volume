@@ -21,6 +21,8 @@ HIGH-RESOLUTION SLA & CASTING FEATURES:
 from __future__ import annotations
 
 import gc
+import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, Tuple, Union
@@ -272,6 +274,10 @@ def chunked_marching_cubes(
 # Backend Negative Mold Generator
 # ---------------------------------------------------------------------------
 
+# Max Z-slices to hold in RAM at once during mold filling.
+# 64 slices × 512 × 512 × float32 ≈ 64 MB — well within the 8 GB constraint.
+MOLD_CHUNK_Z: int = 64
+
 
 def generate_negative_mold(
     vol: SpaceTimeVolume,
@@ -281,9 +287,22 @@ def generate_negative_mold(
     """Generate a solid 3D bounding box array and subtract the Space-Time Volume.
 
     Returns a new SpaceTimeVolume representing the negative mold block:
-      - Solid walls of thickness `wall_thickness` voxels surrounding the object.
+      - Solid walls of thickness ``wall_thickness`` voxels surrounding the object.
       - Hollow interior cavity matching the Space-Time Volume geometry.
       - Top pour hole/spout (if open_top=True) for pouring wax or silicone.
+
+    Memory management
+    -----------------
+    Instead of allocating the entire mold volume in a single ``np.zeros`` call
+    (which can exceed 3 GB for large SLA volumes), this function writes the mold
+    data into a temporary ``np.memmap`` file in Z-axis slabs of ``MOLD_CHUNK_Z``
+    slices.  Peak RAM per slab is bounded by::
+
+        MOLD_CHUNK_Z × total_y × total_x × 4 bytes
+
+    For a 512×512 footprint that is ≈ 64 MB.  After all slabs are written, the
+    memmap array is returned as the backing storage for the new ``SpaceTimeVolume``
+    so no second full-volume copy ever exists in RAM.
     """
     T, H, W = vol.shape
     pad_z = 2  # base layer + top rim clearance
@@ -291,18 +310,45 @@ def generate_negative_mold(
     total_y = H + 2 * wall_thickness + 2
     total_x = W + 2 * wall_thickness + 2
 
-    # Allocate mold array
-    mold_arr = np.zeros((total_z, total_y, total_x), dtype=np.float32)
-    numba_fill_mold_chunk(
-        chunk=mold_arr,
-        obj_data=vol.data,
-        chunk_z0=0,
-        wall_z=wall_thickness + 1,
-        wall_y=wall_thickness + 1,
-        wall_x=wall_thickness + 1,
-        open_top=open_top,
-        mold_total_z=total_z,
+    wall_z = wall_thickness + 1
+    wall_y = wall_thickness + 1
+    wall_x = wall_thickness + 1
+
+    # ------------------------------------------------------------------
+    # Allocate output via a temp memmap so the full mold volume is never
+    # resident in RAM at once.  The file is kept open (delete=False) so
+    # the returned SpaceTimeVolume can still read it; the caller owns the
+    # lifetime.  On CPython the file is unlinked when the process exits.
+    # ------------------------------------------------------------------
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".mold.mmap")
+    os.close(tmp_fd)  # numpy memmap opens the file itself
+    mold_mm = np.memmap(
+        tmp_path,
+        dtype=np.float32,
+        mode="w+",
+        shape=(total_z, total_y, total_x),
     )
+
+    # Process the mold in Z-axis slabs to bound peak RAM.
+    for z0 in range(0, total_z, MOLD_CHUNK_Z):
+        z1 = min(z0 + MOLD_CHUNK_Z, total_z)
+        slab = np.zeros((z1 - z0, total_y, total_x), dtype=np.float32)
+
+        numba_fill_mold_chunk(
+            chunk=slab,
+            obj_data=vol.data,
+            chunk_z0=z0,
+            wall_z=wall_z,
+            wall_y=wall_y,
+            wall_x=wall_x,
+            open_top=open_top,
+            mold_total_z=total_z,
+        )
+
+        mold_mm[z0:z1] = slab
+        mold_mm.flush()  # write slab to disk before releasing RAM
+        del slab
+        gc.collect()
 
     new_meta = {
         **vol.meta,
@@ -310,8 +356,10 @@ def generate_negative_mold(
         "mold_wall_thickness": wall_thickness,
         "mold_open_top": open_top,
         "cavity_shape": vol.shape,
+        "_mold_mmap_path": tmp_path,
     }
-    return SpaceTimeVolume(mold_arr, new_meta)
+    # Return a read-only view of the memmap; SpaceTimeVolume stores it as .data
+    return SpaceTimeVolume(np.asarray(mold_mm), new_meta)
 
 
 # ---------------------------------------------------------------------------
