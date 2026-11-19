@@ -190,8 +190,10 @@ class SpaceTimeViewer:
         )
         self.stl_progress = w.IntProgress(
             value=0, min=0, max=100,
+            description="0%",
             bar_style="info",
-            layout=w.Layout(width="200px", visibility="hidden"),
+            style={"description_width": "32px"},
+            layout=w.Layout(width="220px", visibility="hidden"),
         )
 
         self.regen_btn = w.Button(
@@ -453,11 +455,14 @@ class SpaceTimeViewer:
         def _run():
             try:
                 def _prog(pct):
-                    self.stl_progress.value = int(10 + pct * 0.8)
+                    v = int(10 + pct * 0.8)
+                    self.stl_progress.value = v
+                    self.stl_progress.description = f"{v}%"
 
                 export_params["progress_callback"] = _prog
                 stats = self._export_factory(vol_snapshot, export_params)
                 self.stl_progress.value = 100
+                self.stl_progress.description = "100%"
 
                 wt = "✅ watertight" if stats.is_watertight else "⚠ not watertight"
                 mold_lbl = " [Negative Mold]" if stats.is_negative_mold else " [Positive Model]"
@@ -474,6 +479,7 @@ class SpaceTimeViewer:
                 self.stl_btn.disabled = False
                 self.stl_progress.layout.visibility = "hidden"
                 self.stl_progress.value = 0
+                self.stl_progress.description = "0%"
 
         threading.Thread(target=_run, daemon=True).start()
 
