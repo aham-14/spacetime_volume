@@ -44,6 +44,10 @@ class OpticalFlowInterpolator:
         ``interp_factor=1`` → no-op (returns original).
         ``interp_factor=4`` → 3 new sub-frames inserted per pair
                               (time-axis is 4× denser).
+    method : str
+        Optical flow algorithm:
+        - "farneback": Robust classical dense polynomial expansion.
+        - "dis": Dense Inverse Search (10–50× faster, highly accurate on gradients).
     pyr_scale : float
         Image pyramid scale between levels (Farneback param, default 0.5).
     levels : int
@@ -57,21 +61,29 @@ class OpticalFlowInterpolator:
         Neighbourhood size for polynomial expansion (5 or 7).
     poly_sigma : float
         Gaussian sigma for polynomial expansion (1.1–1.5).
+    dis_preset : int
+        Preset for DIS flow: 0=ULTRAFAST, 1=FAST, 2=MEDIUM (default 1).
     """
 
     def __init__(
         self,
         interp_factor: int = 4,
+        method: str = "farneback",
         pyr_scale: float = 0.5,
         levels: int = 3,
         winsize: int = 15,
         iterations: int = 3,
         poly_n: int = 5,
         poly_sigma: float = 1.2,
+        dis_preset: int = 1,
     ) -> None:
         if interp_factor < 1:
             raise ValueError(f"interp_factor must be >= 1, got {interp_factor}")
         self.interp_factor = interp_factor
+        self.method = str(method).lower()
+        if self.method not in ("farneback", "dis"):
+            raise ValueError(f"Unknown optical flow method '{method}'. Choose 'farneback' or 'dis'.")
+        self.dis_preset = int(np.clip(dis_preset, 0, 2))
         self._flow_params = dict(
             pyr_scale=pyr_scale,
             levels=levels,
@@ -132,9 +144,19 @@ class OpticalFlowInterpolator:
             a_u8 = (frame_a * 255.0).astype(np.uint8)
             b_u8 = (frame_b * 255.0).astype(np.uint8)
 
-            flow = cv2.calcOpticalFlowFarneback(
-                a_u8, b_u8, None, **self._flow_params
-            )  # (H, W, 2): flow[y,x] = (dx, dy) in pixel units
+            # Compute dense displacement field
+            if self.method == "dis":
+                preset_id = [
+                    cv2.DISOPTICAL_FLOW_PRESET_ULTRAFAST,
+                    cv2.DISOPTICAL_FLOW_PRESET_FAST,
+                    cv2.DISOPTICAL_FLOW_PRESET_MEDIUM,
+                ][self.dis_preset]
+                dis_calc = cv2.DISOpticalFlow.create(preset_id)
+                flow = dis_calc.calc(a_u8, b_u8, None)
+            else:
+                flow = cv2.calcOpticalFlowFarneback(
+                    a_u8, b_u8, None, **self._flow_params
+                )  # (H, W, 2): flow[y,x] = (dx, dy) in pixel units
 
             # Precompute base coordinate grids (shape H×W).
             xs = np.arange(W, dtype=np.float32)[None, :]  # (1, W)
@@ -180,7 +202,7 @@ class OpticalFlowInterpolator:
 
         new_meta = {
             **vol.meta,
-            "optical_flow": "farneback",
+            "optical_flow": self.method,
             "interp_factor": K,
             "original_n_frames": T,
         }
@@ -191,8 +213,8 @@ class OpticalFlowInterpolator:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def flow_magnitude(vol: SpaceTimeVolume) -> np.ndarray:
-        """Compute mean Farneback flow magnitude between adjacent frames.
+    def flow_magnitude(vol: SpaceTimeVolume, method: str = "farneback") -> np.ndarray:
+        """Compute mean flow magnitude between adjacent frames.
 
         Returns ndarray shape (T-1,) of mean pixel displacements.
         Useful for diagnosing fast-motion regions before interpolation.
@@ -204,14 +226,20 @@ class OpticalFlowInterpolator:
 
         T = vol.n_frames
         mags = np.empty(T - 1, dtype=np.float32)
+        use_dis = str(method).lower() == "dis"
+        dis_calc = cv2.DISOpticalFlow.create(cv2.DISOPTICAL_FLOW_PRESET_FAST) if use_dis else None
+
         for i in range(T - 1):
             a_u8 = (vol.data[i]     * 255).astype(np.uint8)
             b_u8 = (vol.data[i + 1] * 255).astype(np.uint8)
-            flow = cv2.calcOpticalFlowFarneback(
-                a_u8, b_u8, None,
-                pyr_scale=0.5, levels=3, winsize=15,
-                iterations=3, poly_n=5, poly_sigma=1.2, flags=0,
-            )
+            if use_dis:
+                flow = dis_calc.calc(a_u8, b_u8, None)
+            else:
+                flow = cv2.calcOpticalFlowFarneback(
+                    a_u8, b_u8, None,
+                    pyr_scale=0.5, levels=3, winsize=15,
+                    iterations=3, poly_n=5, poly_sigma=1.2, flags=0,
+                )
             mags[i] = np.sqrt(flow[..., 0] ** 2 + flow[..., 1] ** 2).mean()
         return mags
 

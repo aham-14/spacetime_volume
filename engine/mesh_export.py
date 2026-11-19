@@ -44,6 +44,7 @@ class MeshStats:
     is_watertight: bool
     is_negative_mold: bool
     output_path: str
+    export_format: str = "stl"
 
 
 # ---------------------------------------------------------------------------
@@ -407,18 +408,20 @@ class MeshExporter:
         self,
         vol: SpaceTimeVolume,
         output_path: Union[str, Path],
+        level: Optional[float] = None,
         pad: int = 2,
         as_negative_mold: Optional[bool] = None,
         mold_wall_thickness: Optional[int] = None,
         mold_open_top: Optional[bool] = None,
         progress_callback: Optional[Callable[[float], None]] = None,
     ) -> MeshStats:
-        """Extract mesh, apply Taubin smoothing, scale, and write STL file.
+        """Extract mesh, apply Taubin smoothing, scale, and write 3D file (.stl, .obj, .ply, .glb).
 
         Parameters
         ----------
         vol : SpaceTimeVolume
-        output_path : path-like (.stl)
+        output_path : path-like (.stl, .obj, .ply, .glb)
+        level : float | None (overrides instance level if given)
         pad : int (padding for watertight boundaries)
         as_negative_mold : bool | None (overrides instance setting if given)
         mold_wall_thickness : int | None
@@ -437,7 +440,9 @@ class MeshExporter:
 
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        export_fmt = output_path.suffix.lstrip(".").lower() or "stl"
 
+        eff_level = self.level if level is None else float(level)
         is_mold = self.as_negative_mold if as_negative_mold is None else as_negative_mold
         wall_th = self.mold_wall_thickness if mold_wall_thickness is None else mold_wall_thickness
         open_tp = self.mold_open_top if mold_open_top is None else mold_open_top
@@ -467,7 +472,7 @@ class MeshExporter:
         # --------------------------------------------------------------
         verts, faces = chunked_marching_cubes(
             data_to_mesh,
-            level=self.level,
+            level=eff_level,
             step_size=self.step_size,
             chunk_size=self.chunk_size,
             allow_degenerate=self.allow_degenerate,
@@ -476,7 +481,7 @@ class MeshExporter:
 
         if len(verts) == 0 or len(faces) == 0:
             raise ValueError(
-                f"No isosurface found at level={self.level}. "
+                f"No isosurface found at level={eff_level}. "
                 f"Volume range: [{data_to_mesh.min():.2f}, {data_to_mesh.max():.2f}]."
             )
 
@@ -522,6 +527,7 @@ class MeshExporter:
             is_watertight=bool(mesh.is_watertight),
             is_negative_mold=is_mold,
             output_path=str(output_path.resolve()),
+            export_format=export_fmt,
         )
 
         # Reclaim mesh RAM immediately

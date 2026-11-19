@@ -153,8 +153,22 @@ class SpaceTimeViewer:
 
         self.stl_path_text = w.Text(
             value=str(Path(self._stl_output_dir) / "spacetime_model.stl"),
-            description="STL path:",
-            layout=w.Layout(width="380px"),
+            description="Mesh path:",
+            layout=w.Layout(width="340px"),
+        )
+        self.format_dropdown = w.Dropdown(
+            options=[("STL (.stl)", ".stl"), ("OBJ (.obj)", ".obj"),
+                     ("PLY (.ply)", ".ply"), ("GLB (.glb)", ".glb")],
+            value=".stl",
+            description="Format:",
+            layout=w.Layout(width="180px"),
+        )
+        self.level_slider = w.FloatSlider(
+            value=0.5, min=0.05, max=0.95, step=0.05,
+            description="Isosurface:",
+            tooltip="Scalar field isosurface threshold for marching cubes",
+            readout_format=".2f",
+            layout=w.Layout(width="240px"),
         )
         self.step_size_slider = w.IntSlider(
             value=1, min=1, max=4, step=1,
@@ -183,17 +197,15 @@ class SpaceTimeViewer:
         )
 
         self.stl_btn = w.Button(
-            description="🖨  Generate STL",
+            description="🖨  Export 3D Mesh",
             button_style="success",
             icon="cube",
-            layout=w.Layout(width="170px", height="36px"),
+            layout=w.Layout(width="180px", height="36px"),
         )
         self.stl_progress = w.IntProgress(
             value=0, min=0, max=100,
-            description="0%",
             bar_style="info",
-            style={"description_width": "32px"},
-            layout=w.Layout(width="220px", visibility="hidden"),
+            layout=w.Layout(width="200px", visibility="hidden"),
         )
 
         self.regen_btn = w.Button(
@@ -265,7 +277,8 @@ class SpaceTimeViewer:
             layout=w.Layout(align_items="center", gap="12px"),
         )
         r_stl_params = w.HBox(
-            [self.stl_path_text, self.step_size_slider, self.smooth_iters_slider,
+            [self.stl_path_text, self.format_dropdown, self.level_slider,
+             self.step_size_slider, self.smooth_iters_slider,
              self.voxel_size_slider, self.chunk_size_slider],
             layout=w.Layout(align_items="center", gap="14px", flex_wrap="wrap"),
         )
@@ -300,6 +313,7 @@ class SpaceTimeViewer:
         # (once with the stale cell value, once with the updated value).
         self.edge_width_slider.observe(self._on_edge_width_change, names="value")
         self.as_mold_toggle.observe(self._on_mold_toggle, names="value")
+        self.format_dropdown.observe(self._on_format_change, names="value")
         self.regen_btn.on_click(self._on_regen_click)
         self.stl_btn.on_click(self._on_stl_click)
 
@@ -418,9 +432,15 @@ class SpaceTimeViewer:
         is_mold = bool(change["new"])
         self.mold_open_top.disabled = not is_mold
         self.mold_wall_slider.disabled = not is_mold
-        # Update suggested filename
-        base_name = "spacetime_mold.stl" if is_mold else "spacetime_model.stl"
+        # Update suggested filename with current extension
+        ext = self.format_dropdown.value
+        base_name = f"spacetime_mold{ext}" if is_mold else f"spacetime_model{ext}"
         self.stl_path_text.value = str(Path(self._stl_output_dir) / base_name)
+
+    def _on_format_change(self, change: dict) -> None:
+        new_ext = str(change["new"])
+        current_path = Path(self.stl_path_text.value)
+        self.stl_path_text.value = str(current_path.with_suffix(new_ext))
 
     def _on_regen_click(self, _btn) -> None:
         self._volumes["procedural"] = None
@@ -432,9 +452,10 @@ class SpaceTimeViewer:
             self.stl_status_html.value = "<span style='color:#f88'>⚠ No volume loaded.</span>"
             return
 
-        path = self.stl_path_text.value.strip() or "output/model.stl"
+        path = self.stl_path_text.value.strip() or f"output/model{self.format_dropdown.value}"
         export_params = {
             "path": path,
+            "level": float(self.level_slider.value),
             "as_negative_mold": bool(self.as_mold_toggle.value),
             "mold_open_top": bool(self.mold_open_top.value),
             "mold_wall_thickness": int(self.mold_wall_slider.value),
@@ -455,19 +476,17 @@ class SpaceTimeViewer:
         def _run():
             try:
                 def _prog(pct):
-                    v = int(10 + pct * 0.8)
-                    self.stl_progress.value = v
-                    self.stl_progress.description = f"{v}%"
+                    self.stl_progress.value = int(10 + pct * 0.8)
 
                 export_params["progress_callback"] = _prog
                 stats = self._export_factory(vol_snapshot, export_params)
                 self.stl_progress.value = 100
-                self.stl_progress.description = "100%"
 
                 wt = "✅ watertight" if stats.is_watertight else "⚠ not watertight"
                 mold_lbl = " [Negative Mold]" if stats.is_negative_mold else " [Positive Model]"
+                fmt_name = getattr(stats, "export_format", "STL").upper()
                 self.stl_status_html.value = (
-                    f"<b style='color:#4f4'>✔ STL exported{mold_lbl}</b> → "
+                    f"<b style='color:#4f4'>✔ {fmt_name} exported{mold_lbl}</b> → "
                     f"<code>{stats.output_path}</code><br>"
                     f"Verts: {stats.n_vertices:,} &nbsp;|&nbsp; "
                     f"Faces: {stats.n_faces:,} &nbsp;|&nbsp; "
@@ -479,7 +498,6 @@ class SpaceTimeViewer:
                 self.stl_btn.disabled = False
                 self.stl_progress.layout.visibility = "hidden"
                 self.stl_progress.value = 0
-                self.stl_progress.description = "0%"
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -509,6 +527,10 @@ class SpaceTimeViewer:
         sigma = vol.meta.get("smoothing_sigmas")
         if sigma and any(s > 0 for s in sigma):
             parts.append(f"<b>σ:</b> {sigma}")
+        min_v = float(vol.data.min())
+        max_v = float(vol.data.max())
+        mean_v = float(vol.data.mean())
+        parts.append(f"<b>Intensity:</b> [{min_v:.2f}, {max_v:.2f}] (μ={mean_v:.2f})")
         self.status_html.value = " &nbsp;|&nbsp; ".join(parts)
 
     def show(self):

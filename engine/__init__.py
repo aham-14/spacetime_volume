@@ -20,6 +20,7 @@ from .mesh_export import (
     generate_negative_mold,
     SparseOccupancyIndex,
 )
+from .pipeline import Pipeline, StepTelemetry
 from .dummy_data import dummy_keyframes, dummy_video_array, write_dummy_mp4
 
 __all__ = [
@@ -38,6 +39,8 @@ __all__ = [
     # Mesh export & Mold generation
     "MeshExporter", "MeshStats", "chunked_marching_cubes",
     "generate_negative_mold", "SparseOccupancyIndex",
+    # Composable pipeline
+    "Pipeline", "StepTelemetry",
     # Dummy data
     "dummy_keyframes", "dummy_video_array", "write_dummy_mp4",
 ]

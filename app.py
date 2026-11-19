@@ -147,10 +147,11 @@ def build_viewer(
         smooth_it = params.get("smooth_iterations", stl_smooth_iters)
         vox_sz = params.get("voxel_size", voxel_size_mm)
         chk_sz = params.get("chunk_size", chunk_size)
+        iso_level = float(params.get("level", 0.5))
         prog_cb = params.get("progress_callback", None)
 
         exporter = MeshExporter(
-            level=0.5,
+            level=iso_level,
             step_size=step_sz,
             smooth_iterations=smooth_it,
             voxel_size=vox_sz,
@@ -159,7 +160,7 @@ def build_viewer(
             mold_wall_thickness=wall_th,
             mold_open_top=open_top,
         )
-        return exporter.export(vol, path, progress_callback=prog_cb)
+        return exporter.export(vol, path, level=iso_level, progress_callback=prog_cb)
 
     # ------------------------------------------------------------------
     # Assemble Viewer & Bind Reactive Controls

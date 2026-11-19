@@ -5,10 +5,16 @@ SDF MORPHING FOR 3D PRINTING:
 ------------------------------
 Morphing directly in Signed Distance Field space ensures topological continuity
 and smooth sub-pixel gradients without binary step edges.
+
+Multi-Keyframe Support:
+-----------------------
+Supports arbitrary sequences of 2 or more keyframes. Transitions smoothly through
+all keyframes across the generated volume time axis using piecewise coordinate
+morphing and easing curves.
 """
 from __future__ import annotations
 
-from typing import Optional, Tuple, Union
+from typing import Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -34,80 +40,137 @@ def _build_sdf_from_intensity(img: np.ndarray) -> np.ndarray:
     except ImportError as exc:
         raise ImportError("scipy is required") from exc
 
-    inside  = img > 0.5
+    inside = img > 0.5
     outside = ~inside
-    dist_in  = distance_transform_edt(inside)
+    dist_in = distance_transform_edt(inside)
     dist_out = distance_transform_edt(outside)
     sdf = dist_out - dist_in
     return sdf.astype(np.float32)
 
 
 class ProceduralGenerator:
-    """Build a (t, y, x) SpaceTimeVolume by transitioning Frame A -> Frame B."""
+    """Build a (t, y, x) SpaceTimeVolume by transitioning across keyframes in SDF space."""
 
     def __init__(
         self,
-        frame_a: np.ndarray,
-        frame_b: np.ndarray,
+        frame_a: Optional[np.ndarray] = None,
+        frame_b: Optional[np.ndarray] = None,
+        keyframes: Optional[Sequence[np.ndarray]] = None,
         displacement: Optional[Tuple[float, float]] = None,
         edge_width: float = 2.5,
         sdf_a: Optional[np.ndarray] = None,
         sdf_b: Optional[np.ndarray] = None,
+        sdfs: Optional[Sequence[np.ndarray]] = None,
     ) -> None:
-        a = np.asarray(frame_a, dtype=np.float32)
-        b = np.asarray(frame_b, dtype=np.float32)
-
-        if a.ndim != 2 or b.ndim != 2:
-            raise ValueError("frame_a and frame_b must be 2-D (H, W) arrays.")
-        if a.shape != b.shape:
-            raise ValueError(f"frame_a shape {a.shape} != frame_b shape {b.shape}.")
-
-        self.a = np.clip(a / max(float(a.max()), 1e-9), 0.0, 1.0)
-        self.b = np.clip(b / max(float(b.max()), 1e-9), 0.0, 1.0)
-        self.edge_width = edge_width
-
-        self.sdf_a = (
-            np.asarray(sdf_a, np.float32) if sdf_a is not None
-            else _build_sdf_from_intensity(self.a)
-        )
-        self.sdf_b = (
-            np.asarray(sdf_b, np.float32) if sdf_b is not None
-            else _build_sdf_from_intensity(self.b)
-        )
-
-        if displacement is not None:
-            self.displacement = np.asarray(displacement, dtype=float)
+        # Collect keyframes
+        if keyframes is not None:
+            raw_kfs = [np.asarray(kf, dtype=np.float32) for kf in keyframes]
+        elif frame_a is not None and frame_b is not None:
+            raw_kfs = [np.asarray(frame_a, dtype=np.float32), np.asarray(frame_b, dtype=np.float32)]
         else:
-            self.displacement = intensity_centroid(self.b) - intensity_centroid(self.a)
+            raise ValueError("Must provide either (frame_a, frame_b) or keyframes sequence.")
+
+        if len(raw_kfs) < 2:
+            raise ValueError(f"At least 2 keyframes are required, got {len(raw_kfs)}.")
+
+        ref_shape = raw_kfs[0].shape
+        if len(ref_shape) != 2:
+            raise ValueError(f"Keyframes must be 2-D (H, W), got shape {ref_shape}.")
+        for idx, kf in enumerate(raw_kfs):
+            if kf.shape != ref_shape:
+                raise ValueError(
+                    f"Keyframe {idx} shape {kf.shape} does not match keyframe 0 shape {ref_shape}."
+                )
+
+        self.keyframes = [
+            np.clip(kf / max(float(kf.max()), 1e-9), 0.0, 1.0) for kf in raw_kfs
+        ]
+        self.a = self.keyframes[0]
+        self.b = self.keyframes[-1]
+        self.edge_width = float(edge_width)
+
+        # Build or store SDF representations
+        if sdfs is not None:
+            self.sdfs = [np.asarray(s, dtype=np.float32) for s in sdfs]
+        else:
+            computed_sdfs = []
+            for i, kf in enumerate(self.keyframes):
+                if i == 0 and sdf_a is not None:
+                    computed_sdfs.append(np.asarray(sdf_a, dtype=np.float32))
+                elif i == len(self.keyframes) - 1 and sdf_b is not None:
+                    computed_sdfs.append(np.asarray(sdf_b, dtype=np.float32))
+                else:
+                    computed_sdfs.append(_build_sdf_from_intensity(kf))
+            self.sdfs = computed_sdfs
+
+        self.sdf_a = self.sdfs[0]
+        self.sdf_b = self.sdfs[-1]
+
+        # Inter-keyframe spatial displacement vectors
+        n_segments = len(self.keyframes) - 1
+        if displacement is not None and n_segments == 1:
+            disp_arr = np.asarray(displacement, dtype=float)
+            self.displacements = [disp_arr]
+        else:
+            self.displacements = [
+                intensity_centroid(self.keyframes[i + 1]) - intensity_centroid(self.keyframes[i])
+                for i in range(n_segments)
+            ]
+        self.displacement = self.displacements[0]
 
     def generate(
         self,
         n_frames: int = 48,
         transition_function: Union[str, EasingFn] = "linear (t)",
     ) -> SpaceTimeVolume:
-        """Generate transition volume via SDF coordinate morphing."""
-        if n_frames < 2:
-            raise ValueError(f"n_frames must be >= 2, got {n_frames}")
+        """Generate transition volume via piecewise SDF coordinate morphing.
+
+        Parameters
+        ----------
+        n_frames : int
+            Total frame depth along the time (Z) axis (must be >= len(keyframes)).
+        transition_function : str | Callable
+            Mathematical easing curve name or callable mapping [0, 1] -> [0, 1].
+        """
+        if n_frames < len(self.keyframes):
+            raise ValueError(
+                f"n_frames ({n_frames}) must be >= number of keyframes ({len(self.keyframes)})"
+            )
 
         ease = get_easing(transition_function)
-        t_linear = np.linspace(0.0, 1.0, n_frames)
-        alpha = np.clip(ease(t_linear), 0.0, 1.0).astype(np.float32)
-
-        dy, dx = float(self.displacement[0]), float(self.displacement[1])
         h, w = self.a.shape
         out = np.empty((n_frames, h, w), dtype=np.float32)
 
+        n_segments = len(self.keyframes) - 1
         ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
 
-        for i, al in enumerate(alpha):
-            al = float(al)
-            # Sample SDF_A shifted forward by al * displacement
-            shifted_a = self._sample_sdf(self.sdf_a, ys - al * dy, xs - al * dx)
-            # Sample SDF_B shifted backward by (1-al) * displacement
-            shifted_b = self._sample_sdf(self.sdf_b, ys + (1.0 - al) * dy, xs + (1.0 - al) * dx)
+        # Global time parameter in [0, 1]
+        t_global = np.linspace(0.0, 1.0, n_frames)
 
-            # Linear interpolation in distance field space
-            blended_sdf = (1.0 - al) * shifted_a + al * shifted_b
+        for i, tg in enumerate(t_global):
+            # Map global time tg in [0, 1] to continuous segment coordinate in [0, n_segments]
+            s = tg * n_segments
+            seg_idx = min(int(np.floor(s)), n_segments - 1)
+            # Local normalized time inside segment in [0, 1]
+            if seg_idx == n_segments - 1 and tg >= 1.0 - 1e-9:
+                u = 1.0
+            else:
+                u = float(np.clip(s - seg_idx, 0.0, 1.0))
+
+            # Apply mathematical easing curve to local progression
+            al = float(np.clip(ease(u), 0.0, 1.0))
+
+            sdf_from = self.sdfs[seg_idx]
+            sdf_to = self.sdfs[seg_idx + 1]
+            dy = float(self.displacements[seg_idx][0])
+            dx = float(self.displacements[seg_idx][1])
+
+            # Forward-shift start SDF and backward-shift end SDF along spatial trajectory
+            shifted_from = self._sample_sdf(sdf_from, ys - al * dy, xs - al * dx)
+            shifted_to = self._sample_sdf(sdf_to, ys + (1.0 - al) * dy, xs + (1.0 - al) * dx)
+
+            # Continuous blend in signed distance space
+            blended_sdf = (1.0 - al) * shifted_from + al * shifted_to
             out[i] = sdf_to_intensity(blended_sdf, edge_width=self.edge_width)
 
         easing_label = (
@@ -120,10 +183,9 @@ class ProceduralGenerator:
                 "mode": "procedural",
                 "easing": easing_label,
                 "n_frames": n_frames,
-                "displacement_dy": float(dy),
-                "displacement_dx": float(dx),
+                "n_keyframes": len(self.keyframes),
                 "edge_width": self.edge_width,
-                "morphing": "sdf_interpolation",
+                "morphing": "multi_keyframe_sdf_interpolation",
             },
         )
 
